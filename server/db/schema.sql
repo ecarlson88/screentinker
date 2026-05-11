@@ -375,7 +375,7 @@ CREATE INDEX IF NOT EXISTS idx_activity_log_user ON activity_log(user_id, create
 CREATE TABLE IF NOT EXISTS white_labels (
     id              TEXT PRIMARY KEY,
     user_id         TEXT NOT NULL REFERENCES users(id),
-    brand_name      TEXT NOT NULL DEFAULT 'ScreenTinker',
+    brand_name      TEXT NOT NULL DEFAULT 'SLI-Signs',
     logo_url        TEXT,
     favicon_url     TEXT,
     primary_color   TEXT DEFAULT '#3B82F6',

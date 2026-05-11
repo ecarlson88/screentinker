@@ -55,7 +55,7 @@ object ScreenCaptureService {
         imageReader = ImageReader.newInstance(captureWidth, captureHeight, PixelFormat.RGBA_8888, 4)
 
         virtualDisplay = projection.createVirtualDisplay(
-            "ScreenTinker",
+            "SLI-Signs",
             captureWidth, captureHeight, density,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             imageReader!!.surface, null, null

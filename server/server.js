@@ -102,15 +102,13 @@ app.use((req, res, next) => {
 });
 // CORS policy.
 // - SELF_HOSTED=true: allow all origins (operator controls their own deployment).
-// - production:       allowlist screentinker.com (+ subdomains) and localhost dev.
+// - production:       allowlist configured domain(s) and localhost dev.
 // - development:      open (default).
 // Auth is JWT in Authorization header — credentials:true is kept for any cookie-based
 // future flows but the JWT stays in localStorage and is sent via fetch() explicitly,
 // so an attacker origin can't ride a session.
 const isProd = process.env.NODE_ENV === 'production';
 const allowedHostsProd = [
-  'screentinker.com',
-  'www.screentinker.com',
   'localhost',
   '127.0.0.1',
 ];
@@ -139,27 +137,9 @@ app.use(express.json());
 const { sanitizeBody } = require('./middleware/sanitize');
 app.use(sanitizeBody);
 
-// Landing page BEFORE static middleware (so / doesn't serve index.html)
-app.get('/', (req, res) => {
-  res.sendFile(path.join(config.frontendDir, 'landing.html'));
-});
-
-// Dashboard app
+// App shell — auth guard in the SPA redirects unauthenticated users to #/login
 app.get('/app', (req, res) => {
   res.sendFile(path.join(config.frontendDir, 'index.html'));
-});
-
-// Sitemap and robots — served explicitly so the Content-Type is guaranteed
-// and these endpoints are immune to any future static-middleware reshuffle.
-app.get('/sitemap.xml', (req, res) => {
-  res.type('application/xml');
-  res.setHeader('Cache-Control', 'public, max-age=3600'); // 1h, sitemap rarely changes
-  res.sendFile(path.join(config.frontendDir, 'sitemap.xml'));
-});
-app.get('/robots.txt', (req, res) => {
-  res.type('text/plain');
-  res.setHeader('Cache-Control', 'public, max-age=3600');
-  res.sendFile(path.join(config.frontendDir, 'robots.txt'));
 });
 
 // Serve frontend static files
@@ -364,7 +344,7 @@ app.use(activityLogger);
 // APK version check endpoint (public, used by devices to check for updates)
 app.get('/api/update/check', (req, res) => {
   const currentVersion = req.query.version;
-  const apkPath = path.join(__dirname, '..', 'ScreenTinker.apk');
+  const apkPath = path.join(__dirname, '..', 'SLI-Signs.apk');
   const apkExists = fs.existsSync(apkPath);
   const apkSize = apkExists ? fs.statSync(apkPath).size : 0;
   const apkModified = apkExists ? fs.statSync(apkPath).mtimeMs : 0;
@@ -449,15 +429,15 @@ app.post('/api/provision/pair', requireAuth, checkDeviceLimit, (req, res) => {
 });
 
 // Serve APK download
-const apkPath = path.join(__dirname, '..', 'ScreenTinker.apk');
+const apkPath = path.join(__dirname, '..', 'SLI-Signs.apk');
 app.get('/download/apk', (req, res) => {
   if (fs.existsSync(apkPath)) {
     res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-    res.setHeader('Content-Disposition', 'attachment; filename="ScreenTinker.apk"');
+    res.setHeader('Content-Disposition', 'attachment; filename="SLI-Signs.apk"');
     res.setHeader('Cache-Control', 'no-cache');
     res.sendFile(apkPath);
   } else {
-    res.status(404).send(`<!DOCTYPE html><html><head><title>APK Not Found</title><style>body{font-family:-apple-system,system-ui,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#0f172a;color:#e2e8f0}div{text-align:center;max-width:500px;padding:24px}h1{color:#f87171;font-size:24px}code{background:#1e293b;padding:2px 8px;border-radius:4px;font-size:14px}p{line-height:1.6;color:#94a3b8}</style></head><body><div><h1>APK Not Available</h1><p>The Android APK has not been compiled yet. To build it from source:</p><p><code>cd android</code><br><code>./gradlew assembleDebug</code><br><code>cp app/build/outputs/apk/debug/app-debug.apk ../ScreenTinker.apk</code></p><p>See the <a href="/" style="color:#3b82f6">README</a> for full build instructions.</p><p>Alternatively, use the <a href="/player" style="color:#3b82f6">web player</a> in any browser.</p></div></body></html>`);
+    res.status(404).send(`<!DOCTYPE html><html><head><title>APK Not Found</title><style>body{font-family:-apple-system,system-ui,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#0f172a;color:#e2e8f0}div{text-align:center;max-width:500px;padding:24px}h1{color:#f87171;font-size:24px}code{background:#1e293b;padding:2px 8px;border-radius:4px;font-size:14px}p{line-height:1.6;color:#94a3b8}</style></head><body><div><h1>APK Not Available</h1><p>The Android APK has not been compiled yet. To build it from source:</p><p><code>cd android</code><br><code>./gradlew assembleDebug</code><br><code>cp app/build/outputs/apk/debug/app-debug.apk ../SLI-Signs.apk</code></p><p>See the <a href="/" style="color:#3b82f6">README</a> for full build instructions.</p><p>Alternatively, use the <a href="/player" style="color:#3b82f6">web player</a> in any browser.</p></div></body></html>`);
   }
 });
 
@@ -476,7 +456,7 @@ const protocol = hasSsl ? 'https' : 'http';
 server.listen(listenPort, '0.0.0.0', () => {
   console.log(`
 ╔══════════════════════════════════════════════════╗
-║       ScreenTinker Server v1.2.0                ║
+║         SLI-Signs Server v1.2.0                 ║
 ║──────────────────────────────────────────────────║
 ║  Dashboard: ${protocol}://localhost:${String(listenPort).padEnd(5)}              ║
 ║  API:       ${protocol}://localhost:${String(listenPort).padEnd(5)}/api          ║

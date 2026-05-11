@@ -97,7 +97,7 @@ class UpdateChecker(private val context: Context) {
             }
 
             val apkFile = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),
-                "ScreenTinker-$version.apk")
+                "SLI-Signs-$version.apk")
 
             response.body?.byteStream()?.use { input ->
                 apkFile.outputStream().use { output ->
@@ -160,7 +160,7 @@ class UpdateChecker(private val context: Context) {
                 val session = installer.openSession(sessionId)
 
                 apkFile.inputStream().use { input ->
-                    session.openWrite("ScreenTinker", 0, apkFile.length()).use { output ->
+                    session.openWrite("SLI-Signs", 0, apkFile.length()).use { output ->
                         input.copyTo(output)
                         session.fsync(output)
                     }

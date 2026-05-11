@@ -9,7 +9,7 @@ class RemoteDisplayApp : Application() {
 
     companion object {
         const val CHANNEL_ID = "remote_display_service"
-        const val CHANNEL_NAME = "ScreenTinker Service"
+        const val CHANNEL_NAME = "SLI-Signs Service"
     }
 
     override fun onCreate() {
@@ -24,7 +24,7 @@ class RemoteDisplayApp : Application() {
                 CHANNEL_NAME,
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "ScreenTinker background service"
+                description = "SLI-Signs background service"
                 setShowBadge(false)
             }
             val manager = getSystemService(NotificationManager::class.java)

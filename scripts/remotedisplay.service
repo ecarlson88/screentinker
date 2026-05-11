@@ -1,5 +1,5 @@
 [Unit]
-Description=ScreenTinker Digital Signage Server
+Description=SLI-Signs Digital Signage Server
 After=network.target
 Wants=network-online.target
 

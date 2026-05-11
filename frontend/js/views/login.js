@@ -25,7 +25,7 @@ export async function render(container) {
             <line x1="8" y1="21" x2="16" y2="21"/>
             <line x1="12" y1="17" x2="12" y2="21"/>
           </svg>
-          <h1 style="font-size:24px;font-weight:700;color:var(--accent)">ScreenTinker</h1>
+          <h1 style="font-size:24px;font-weight:700;color:var(--accent)">SLI-Signs</h1>
           <p style="color:var(--text-secondary);font-size:13px;margin-top:4px">
             ${isSetup ? t('auth.subtitle_setup') : t('auth.subtitle_signin')}
           </p>

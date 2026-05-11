@@ -104,7 +104,7 @@ router.get('/export', (req, res) => {
   const whiteLabel = db.prepare('SELECT * FROM white_labels WHERE user_id = ?').get(userId);
 
   const exportData = {
-    format: 'screentinker-export-v2',
+    format: 'sli-signs-export-v2',
     exported_at: new Date().toISOString(),
     user,
     devices: devices.map(d => {
@@ -132,7 +132,7 @@ router.get('/export', (req, res) => {
     const archiver = require('archiver');
     const dateStr = new Date().toISOString().split('T')[0];
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename=screentinker-export-${dateStr}.zip`);
+    res.setHeader('Content-Disposition', `attachment; filename=sli-signs-export-${dateStr}.zip`);
 
     const archive = archiver('zip', { zlib: { level: 5 } });
     archive.pipe(res);
@@ -165,13 +165,13 @@ router.get('/export', (req, res) => {
   }
 
   res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Content-Disposition', `attachment; filename=screentinker-export-${new Date().toISOString().split('T')[0]}.json`);
+  res.setHeader('Content-Disposition', `attachment; filename=sli-signs-export-${new Date().toISOString().split('T')[0]}.json`);
   res.json(exportData);
 });
 
 // User data import (JSON or ZIP with files)
 const multer = require('multer');
-const importUpload = multer({ dest: path.join(os.tmpdir(), 'screentinker-import'), limits: { fileSize: 2 * 1024 * 1024 * 1024 } }); // 2GB max
+const importUpload = multer({ dest: path.join(os.tmpdir(), 'sli-signs-import'), limits: { fileSize: 2 * 1024 * 1024 * 1024 } }); // 2GB max
 
 router.post('/import', importUpload.single('file'), async (req, res) => {
   const authHeader = req.headers.authorization;
@@ -198,7 +198,7 @@ router.post('/import', importUpload.single('file'), async (req, res) => {
     // ZIP upload — extract export.json and files/
     try {
       const unzipper = require('unzipper');
-      const extractDir = path.join(os.tmpdir(), `screentinker-import-${Date.now()}`);
+      const extractDir = path.join(os.tmpdir(), `sli-signs-import-${Date.now()}`);
       fs.mkdirSync(extractDir, { recursive: true });
 
       await new Promise((resolve, reject) => {
@@ -244,11 +244,11 @@ router.post('/import', importUpload.single('file'), async (req, res) => {
   } else {
     data = req.body;
   }
-  if (!data || !data.format || !data.format.startsWith('screentinker-export')) {
-    return res.status(400).json({ error: 'Invalid export file. Must be a ScreenTinker export JSON.' });
+  if (!data || !data.format || !data.format.startsWith('sli-signs-export')) {
+    return res.status(400).json({ error: 'Invalid export file. Must be a SLI-Signs export JSON.' });
   }
 
-  const isV2 = data.format === 'screentinker-export-v2';
+  const isV2 = data.format === 'sli-signs-export-v2';
   const uuid = require('uuid');
   const stats = { devices: 0, content: 0, widgets: 0, layouts: 0, playlists: 0, schedules: 0, video_walls: 0, kiosk_pages: 0, device_groups: 0 };
 
@@ -414,9 +414,9 @@ router.post('/import', importUpload.single('file'), async (req, res) => {
       const wl = data.white_label;
       const existing = db.prepare('SELECT id FROM white_labels WHERE user_id = ?').get(userId);
       if (existing) {
-        db.prepare(`UPDATE white_labels SET brand_name=?, logo_url=?, favicon_url=?, primary_color=?, bg_color=?, custom_domain=?, custom_css=?, hide_branding=?, updated_at=strftime('%s','now') WHERE user_id=?`).run(wl.brand_name || 'ScreenTinker', wl.logo_url || null, wl.favicon_url || null, wl.primary_color || '#3B82F6', wl.bg_color || '#111827', wl.custom_domain || null, wl.custom_css || null, wl.hide_branding || 0, userId);
+        db.prepare(`UPDATE white_labels SET brand_name=?, logo_url=?, favicon_url=?, primary_color=?, bg_color=?, custom_domain=?, custom_css=?, hide_branding=?, updated_at=strftime('%s','now') WHERE user_id=?`).run(wl.brand_name || 'SLI-Signs', wl.logo_url || null, wl.favicon_url || null, wl.primary_color || '#3B82F6', wl.bg_color || '#111827', wl.custom_domain || null, wl.custom_css || null, wl.hide_branding || 0, userId);
       } else {
-        db.prepare(`INSERT INTO white_labels (id, user_id, brand_name, logo_url, favicon_url, primary_color, bg_color, custom_domain, custom_css, hide_branding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(uuid.v4(), userId, wl.brand_name || 'ScreenTinker', wl.logo_url || null, wl.favicon_url || null, wl.primary_color || '#3B82F6', wl.bg_color || '#111827', wl.custom_domain || null, wl.custom_css || null, wl.hide_branding || 0);
+        db.prepare(`INSERT INTO white_labels (id, user_id, brand_name, logo_url, favicon_url, primary_color, bg_color, custom_domain, custom_css, hide_branding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(uuid.v4(), userId, wl.brand_name || 'SLI-Signs', wl.logo_url || null, wl.favicon_url || null, wl.primary_color || '#3B82F6', wl.bg_color || '#111827', wl.custom_domain || null, wl.custom_css || null, wl.hide_branding || 0);
       }
     }
   });

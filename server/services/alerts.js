@@ -38,7 +38,7 @@ function checkOfflineDevices(io) {
       const offlineMinutes = Math.floor((now - device.last_heartbeat) / 60);
       sendEmailAlert(device.owner_email, device.owner_name, {
         subject: `Display Offline: ${device.name}`,
-        body: `Your display "${device.name}" has been offline for ${offlineMinutes} minutes.\n\nLast heartbeat: ${new Date(device.last_heartbeat * 1000).toLocaleString()}\n\nCheck your device and network connection.\n\n- ScreenTinker`
+        body: `Your display "${device.name}" has been offline for ${offlineMinutes} minutes.\n\nLast heartbeat: ${new Date(device.last_heartbeat * 1000).toLocaleString()}\n\nCheck your device and network connection.\n\n- SLI-Signs`
       });
       offlineNotified.set(device.id, now);
 
@@ -73,16 +73,16 @@ function sendEmailAlert(to, name, { subject, body }) {
     const url = new URL(webhookUrl);
     const postData = JSON.stringify({
       to,
-      subject: `[ScreenTinker] ${subject}`,
+      subject: `[SLI-Signs] ${subject}`,
       text: body,
       html: `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px">
-        <h2 style="color:#3b82f6">ScreenTinker Alert</h2>
+        <h2 style="color:#3b82f6">SLI-Signs Alert</h2>
         <p>Hi ${name || 'there'},</p>
         <div style="background:#f1f5f9;padding:16px;border-radius:8px;margin:16px 0">
           <strong>${subject}</strong><br><br>
           ${body.replace(/\n/g, '<br>')}
         </div>
-        <p style="color:#94a3b8;font-size:12px">You're receiving this because you have email alerts enabled in ScreenTinker.</p>
+        <p style="color:#94a3b8;font-size:12px">You're receiving this because you have email alerts enabled in SLI-Signs.</p>
       </div>`
     });
 

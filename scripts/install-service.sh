@@ -1,9 +1,9 @@
 #!/bin/bash
-# Install ScreenTinker as a systemd service
+# Install SLI-Signs as a systemd service
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVICE_FILE="$SCRIPT_DIR/remotedisplay.service"
 
-echo "Installing ScreenTinker service..."
+echo "Installing SLI-Signs service..."
 sudo cp "$SERVICE_FILE" /etc/systemd/system/remotedisplay.service
 sudo systemctl daemon-reload
 sudo systemctl enable remotedisplay

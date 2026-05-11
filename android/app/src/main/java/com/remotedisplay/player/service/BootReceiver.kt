@@ -18,7 +18,7 @@ class BootReceiver : BroadcastReceiver() {
             action == "android.intent.action.QUICKBOOT_POWERON" ||
             action == "com.htc.intent.action.QUICKBOOT_POWERON") {
 
-            Log.i("BootReceiver", "Boot completed (action=$action), launching ScreenTinker")
+            Log.i("BootReceiver", "Boot completed (action=$action), launching SLI-Signs")
 
             // Start the foreground service
             try {
@@ -45,7 +45,7 @@ class BootReceiver : BroadcastReceiver() {
                 )
 
                 val notification = NotificationCompat.Builder(context, RemoteDisplayApp.CHANNEL_ID)
-                    .setContentTitle("ScreenTinker")
+                    .setContentTitle("SLI-Signs")
                     .setContentText("Starting display...")
                     .setSmallIcon(android.R.drawable.ic_media_play)
                     .setPriority(NotificationCompat.PRIORITY_HIGH)

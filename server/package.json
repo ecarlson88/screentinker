@@ -1,7 +1,7 @@
 {
   "name": "remote-display-server",
   "version": "1.0.0",
-  "description": "ScreenTinker - Digital Signage Management Server",
+  "description": "SLI-Signs - Digital Signage Management Server",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

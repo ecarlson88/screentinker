@@ -1,6 +1,6 @@
 {
-  "name": "ScreenTinker",
-  "short_name": "ScreenTinker",
+  "name": "SLI-Signs",
+  "short_name": "SLI-Signs",
   "description": "Digital Signage Management",
   "start_url": "/",
   "display": "standalone",

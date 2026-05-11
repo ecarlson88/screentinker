@@ -1,16 +1,16 @@
 #!/bin/bash
-# ScreenTinker - Raspberry Pi Setup Script
+# SLI-Signs - Raspberry Pi Setup Script
 #
-# All-in-One: runs the ScreenTinker server AND kiosk player on one Pi
-# Player-Only: connects to an existing ScreenTinker server
+# All-in-One: runs the SLI-Signs server AND kiosk player on one Pi
+# Player-Only: connects to an existing SLI-Signs server
 #
 # Usage:
-#   All-in-One:   curl -sSL https://screentinker.com/scripts/raspberry-pi-setup.sh | sudo bash
-#   Player-Only:  curl -sSL https://screentinker.com/scripts/raspberry-pi-setup.sh | sudo bash -s -- --player-only https://screentinker.com
+#   All-in-One:   curl -sSL https://sli-signs.com/scripts/raspberry-pi-setup.sh | sudo bash
+#   Player-Only:  curl -sSL https://sli-signs.com/scripts/raspberry-pi-setup.sh | sudo bash -s -- --player-only https://sli-signs.com
 #
 # Or clone and run:
-#   git clone https://github.com/screentinker/screentinker.git
-#   cd screentinker/scripts && sudo ./raspberry-pi-setup.sh
+#   git clone https://github.com/sli-signs/sli-signs.git
+#   cd sli-signs/scripts && sudo ./raspberry-pi-setup.sh
 #
 # Works on Raspberry Pi OS Lite or Desktop (Bookworm / Bullseye)
 # Tested on Pi 3B+, Pi 4, Pi 5
@@ -18,10 +18,10 @@
 set -euo pipefail
 
 # -- Configuration --
-SCREENTINKER_DIR="/opt/screentinker"
-SCREENTINKER_PORT=3001
+SLI_SIGNS_DIR="/opt/sli-signs"
+SLI_SIGNS_PORT=3001
 NODE_MAJOR=20
-LOG_FILE="/var/log/screentinker-setup.log"
+LOG_FILE="/var/log/sli-signs-setup.log"
 
 # -- Colors --
 RED='\033[0;31m'
@@ -30,7 +30,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-log()  { echo -e "${GREEN}[ScreenTinker]${NC} $1"; }
+log()  { echo -e "${GREEN}[SLI-Signs]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
 err()  { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
@@ -50,7 +50,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Examples:"
             echo "  sudo ./raspberry-pi-setup.sh                                    # All-in-One (interactive)"
-            echo "  sudo ./raspberry-pi-setup.sh --player-only https://screentinker.com"
+            echo "  sudo ./raspberry-pi-setup.sh --player-only https://sli-signs.com"
             exit 0
             ;;
         http*) SERVER_URL="$1"; shift ;;
@@ -75,7 +75,7 @@ fi
 if [ "$PLAYER_ONLY" = false ] && [ -z "$SERVER_URL" ]; then
     echo ""
     echo -e "${BLUE}======================================${NC}"
-    echo -e "${BLUE}   ScreenTinker Raspberry Pi Setup${NC}"
+    echo -e "${BLUE}   SLI-Signs Raspberry Pi Setup${NC}"
     echo -e "${BLUE}======================================${NC}"
     echo ""
     echo "  1) All-in-One  (recommended)"
@@ -83,14 +83,14 @@ if [ "$PLAYER_ONLY" = false ] && [ -z "$SERVER_URL" ]; then
     echo "     Manage everything from your phone."
     echo ""
     echo "  2) Player Only"
-    echo "     Connects to an existing ScreenTinker server."
+    echo "     Connects to an existing SLI-Signs server."
     echo "     This Pi just displays content."
     echo ""
     read -p "Choose [1/2]: " MODE_CHOICE
     case "$MODE_CHOICE" in
         2)
             PLAYER_ONLY=true
-            read -p "Server URL (e.g., https://screentinker.com): " SERVER_URL
+            read -p "Server URL (e.g., https://sli-signs.com): " SERVER_URL
             ;;
         *) ;;
     esac
@@ -105,7 +105,7 @@ if [ "$PLAYER_ONLY" = true ]; then
     KIOSK_URL="${SERVER_URL}/player"
     log "Player-only mode: $SERVER_URL"
 else
-    KIOSK_URL="http://localhost:${SCREENTINKER_PORT}/player"
+    KIOSK_URL="http://localhost:${SLI_SIGNS_PORT}/player"
     log "All-in-One mode: server + player"
 fi
 
@@ -157,24 +157,24 @@ if [ "$PLAYER_ONLY" = false ]; then
 fi
 
 # ============================================================
-# 3. Clone / update ScreenTinker (all-in-one only)
+# 3. Clone / update SLI-Signs (all-in-one only)
 # ============================================================
 if [ "$PLAYER_ONLY" = false ]; then
-    if [ -d "$SCREENTINKER_DIR/.git" ]; then
-        log "Repo exists at $SCREENTINKER_DIR, pulling latest..."
-        cd "$SCREENTINKER_DIR" && git pull origin main >> "$LOG_FILE" 2>&1
+    if [ -d "$SLI_SIGNS_DIR/.git" ]; then
+        log "Repo exists at $SLI_SIGNS_DIR, pulling latest..."
+        cd "$SLI_SIGNS_DIR" && git pull origin main >> "$LOG_FILE" 2>&1
     else
-        log "Cloning ScreenTinker..."
-        git clone https://github.com/screentinker/screentinker.git "$SCREENTINKER_DIR" >> "$LOG_FILE" 2>&1
+        log "Cloning SLI-Signs..."
+        git clone https://github.com/sli-signs/sli-signs.git "$SLI_SIGNS_DIR" >> "$LOG_FILE" 2>&1
     fi
 
     log "Installing Node.js dependencies..."
-    cd "$SCREENTINKER_DIR/server"
+    cd "$SLI_SIGNS_DIR/server"
     npm install --production >> "$LOG_FILE" 2>&1
 
     # Data directories
-    mkdir -p "$SCREENTINKER_DIR/server/db"
-    mkdir -p "$SCREENTINKER_DIR/server/uploads"
+    mkdir -p "$SLI_SIGNS_DIR/server/db"
+    mkdir -p "$SLI_SIGNS_DIR/server/uploads"
 fi
 
 # Determine the runtime user
@@ -183,24 +183,24 @@ PI_HOME=$(eval echo "~$PI_USER")
 
 # Set ownership (all-in-one only)
 if [ "$PLAYER_ONLY" = false ]; then
-    chown -R "$PI_USER":"$PI_USER" "$SCREENTINKER_DIR"
+    chown -R "$PI_USER":"$PI_USER" "$SLI_SIGNS_DIR"
 fi
 
 # ============================================================
 # 4. Server systemd service (all-in-one only)
 # ============================================================
 if [ "$PLAYER_ONLY" = false ]; then
-    log "Creating screentinker-server service..."
-    cat > /etc/systemd/system/screentinker-server.service << EOF
+    log "Creating sli-signs-server service..."
+    cat > /etc/systemd/system/sli-signs-server.service << EOF
 [Unit]
-Description=ScreenTinker Digital Signage Server
+Description=SLI-Signs Digital Signage Server
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=${PI_USER}
-WorkingDirectory=${SCREENTINKER_DIR}/server
+WorkingDirectory=${SLI_SIGNS_DIR}/server
 ExecStart=/usr/bin/node server.js
 Restart=always
 RestartSec=5
@@ -208,20 +208,20 @@ StartLimitBurst=5
 StartLimitIntervalSec=60
 
 Environment=NODE_ENV=production
-Environment=PORT=${SCREENTINKER_PORT}
+Environment=PORT=${SLI_SIGNS_PORT}
 Environment=SELF_HOSTED=true
 Environment=HOST=0.0.0.0
 
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=screentinker-server
+SyslogIdentifier=sli-signs-server
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable screentinker-server.service
+    systemctl enable sli-signs-server.service
     log "Server service enabled"
 fi
 
@@ -251,9 +251,9 @@ CHROMIUM_BIN=$(command -v chromium-browser 2>/dev/null || command -v chromium 2>
 # 6. Kiosk launcher script
 # ============================================================
 log "Creating kiosk launcher..."
-cat > "$PI_HOME/screentinker-kiosk.sh" << KIOSKEOF
+cat > "$PI_HOME/sli-signs-kiosk.sh" << KIOSKEOF
 #!/bin/bash
-# ScreenTinker Kiosk - launches Chromium in fullscreen player mode
+# SLI-Signs Kiosk - launches Chromium in fullscreen player mode
 KIOSK_URL="${KIOSK_URL}"
 
 # Wait for display
@@ -278,9 +278,9 @@ fi
 
 # Wait for local server if running all-in-one
 if echo "\$KIOSK_URL" | grep -q "localhost"; then
-    echo "Waiting for ScreenTinker server..."
+    echo "Waiting for SLI-Signs server..."
     for i in \$(seq 1 30); do
-        if curl -sf "http://localhost:${SCREENTINKER_PORT}/api/health" >/dev/null 2>&1; then
+        if curl -sf "http://localhost:${SLI_SIGNS_PORT}/api/health" >/dev/null 2>&1; then
             echo "Server ready"
             break
         fi
@@ -315,8 +315,8 @@ exec ${CHROMIUM_BIN} \\
     "\$KIOSK_URL"
 KIOSKEOF
 
-chmod +x "$PI_HOME/screentinker-kiosk.sh"
-chown "$PI_USER":"$PI_USER" "$PI_HOME/screentinker-kiosk.sh"
+chmod +x "$PI_HOME/sli-signs-kiosk.sh"
+chown "$PI_USER":"$PI_USER" "$PI_HOME/sli-signs-kiosk.sh"
 
 # ============================================================
 # 7. Xinitrc (Pi OS Lite - starts kiosk from console)
@@ -324,7 +324,7 @@ chown "$PI_USER":"$PI_USER" "$PI_HOME/screentinker-kiosk.sh"
 if [ "$HAS_DESKTOP" = false ]; then
     cat > "$PI_HOME/.xinitrc" << 'EOF'
 #!/bin/bash
-exec ~/screentinker-kiosk.sh
+exec ~/sli-signs-kiosk.sh
 EOF
     chmod +x "$PI_HOME/.xinitrc"
     chown "$PI_USER":"$PI_USER" "$PI_HOME/.xinitrc"
@@ -338,16 +338,16 @@ log "Creating kiosk service..."
 if [ "$HAS_DESKTOP" = false ]; then
     # Lite: start X ourselves
     if [ "$PLAYER_ONLY" = false ]; then
-        KIOSK_AFTER="After=screentinker-server.service"
-        KIOSK_REQ="Requires=screentinker-server.service"
+        KIOSK_AFTER="After=sli-signs-server.service"
+        KIOSK_REQ="Requires=sli-signs-server.service"
     else
         KIOSK_AFTER="After=network-online.target"
         KIOSK_REQ="Wants=network-online.target"
     fi
 
-    cat > /etc/systemd/system/screentinker-kiosk.service << EOF
+    cat > /etc/systemd/system/sli-signs-kiosk.service << EOF
 [Unit]
-Description=ScreenTinker Kiosk Display
+Description=SLI-Signs Kiosk Display
 ${KIOSK_AFTER}
 ${KIOSK_REQ}
 
@@ -365,7 +365,7 @@ TTYPath=/dev/tty1
 StandardInput=tty
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=screentinker-kiosk
+SyslogIdentifier=sli-signs-kiosk
 
 [Install]
 WantedBy=multi-user.target
@@ -373,16 +373,16 @@ EOF
 else
     # Desktop: X already running, just launch Chromium
     if [ "$PLAYER_ONLY" = false ]; then
-        KIOSK_AFTER="After=screentinker-server.service graphical.target"
-        KIOSK_REQ="Requires=screentinker-server.service"
+        KIOSK_AFTER="After=sli-signs-server.service graphical.target"
+        KIOSK_REQ="Requires=sli-signs-server.service"
     else
         KIOSK_AFTER="After=graphical.target"
         KIOSK_REQ="Wants=graphical.target"
     fi
 
-    cat > /etc/systemd/system/screentinker-kiosk.service << EOF
+    cat > /etc/systemd/system/sli-signs-kiosk.service << EOF
 [Unit]
-Description=ScreenTinker Kiosk Display
+Description=SLI-Signs Kiosk Display
 ${KIOSK_AFTER}
 ${KIOSK_REQ}
 
@@ -391,13 +391,13 @@ Type=simple
 User=${PI_USER}
 Environment=DISPLAY=:0
 ExecStartPre=/bin/sleep 5
-ExecStart=/bin/bash ${PI_HOME}/screentinker-kiosk.sh
+ExecStart=/bin/bash ${PI_HOME}/sli-signs-kiosk.sh
 Restart=always
 RestartSec=10
 
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=screentinker-kiosk
+SyslogIdentifier=sli-signs-kiosk
 
 [Install]
 WantedBy=graphical.target
@@ -405,18 +405,18 @@ EOF
 fi
 
 systemctl daemon-reload
-systemctl enable screentinker-kiosk.service
+systemctl enable sli-signs-kiosk.service
 log "Kiosk service enabled"
 
 # Desktop: autostart entry as fallback
 if [ "$HAS_DESKTOP" = true ]; then
     AUTOSTART_DIR="$PI_HOME/.config/autostart"
     mkdir -p "$AUTOSTART_DIR"
-    cat > "$AUTOSTART_DIR/screentinker.desktop" << EOF
+    cat > "$AUTOSTART_DIR/sli-signs.desktop" << EOF
 [Desktop Entry]
 Type=Application
-Name=ScreenTinker Player
-Exec=${PI_HOME}/screentinker-kiosk.sh
+Name=SLI-Signs Player
+Exec=${PI_HOME}/sli-signs-kiosk.sh
 X-GNOME-Autostart-enabled=true
 EOF
     chown -R "$PI_USER":"$PI_USER" "$AUTOSTART_DIR"
@@ -449,7 +449,7 @@ done
 if [ -n "$CONFIG_FILE" ]; then
     # GPU memory for video playback
     if ! grep -q "^gpu_mem=" "$CONFIG_FILE"; then
-        echo -e "\n# ScreenTinker: GPU memory for smooth video" >> "$CONFIG_FILE"
+        echo -e "\n# SLI-Signs: GPU memory for smooth video" >> "$CONFIG_FILE"
         echo "gpu_mem=128" >> "$CONFIG_FILE"
         log "GPU memory: 128MB"
     fi
@@ -489,43 +489,43 @@ fi
 if [ "$PLAYER_ONLY" = false ]; then
     log "Creating management scripts..."
 
-    cat > /usr/local/bin/screentinker-update << 'UPDATEEOF'
+    cat > /usr/local/bin/sli-signs-update << 'UPDATEEOF'
 #!/bin/bash
 echo "Stopping services..."
-sudo systemctl stop screentinker-kiosk.service 2>/dev/null || true
-sudo systemctl stop screentinker-server.service 2>/dev/null || true
+sudo systemctl stop sli-signs-kiosk.service 2>/dev/null || true
+sudo systemctl stop sli-signs-server.service 2>/dev/null || true
 
 echo "Pulling latest..."
-cd /opt/screentinker && git pull origin main
+cd /opt/sli-signs && git pull origin main
 
 echo "Installing dependencies..."
 cd server && npm install --production
 
 echo "Starting services..."
-sudo systemctl start screentinker-server.service
+sudo systemctl start sli-signs-server.service
 sleep 3
-sudo systemctl start screentinker-kiosk.service
+sudo systemctl start sli-signs-kiosk.service
 
 echo ""
-echo "Done! Server: $(systemctl is-active screentinker-server.service)"
-echo "      Kiosk:  $(systemctl is-active screentinker-kiosk.service)"
+echo "Done! Server: $(systemctl is-active sli-signs-server.service)"
+echo "      Kiosk:  $(systemctl is-active sli-signs-kiosk.service)"
 UPDATEEOF
-    chmod +x /usr/local/bin/screentinker-update
+    chmod +x /usr/local/bin/sli-signs-update
 
-    cat > /usr/local/bin/screentinker-status << 'STATUSEOF'
+    cat > /usr/local/bin/sli-signs-status << 'STATUSEOF'
 #!/bin/bash
 echo ""
-echo "=== ScreenTinker Status ==="
+echo "=== SLI-Signs Status ==="
 echo ""
 IP=$(hostname -I | awk '{print $1}')
 
-if systemctl is-active screentinker-server.service &>/dev/null; then
-    echo "Server:    RUNNING (PID $(systemctl show screentinker-server.service -p MainPID --value))"
+if systemctl is-active sli-signs-server.service &>/dev/null; then
+    echo "Server:    RUNNING (PID $(systemctl show sli-signs-server.service -p MainPID --value))"
 else
     echo "Server:    STOPPED"
 fi
 
-if systemctl is-active screentinker-kiosk.service &>/dev/null; then
+if systemctl is-active sli-signs-kiosk.service &>/dev/null; then
     echo "Kiosk:     RUNNING"
 else
     echo "Kiosk:     STOPPED"
@@ -534,7 +534,7 @@ fi
 echo ""
 echo "Uptime:    $(uptime -p)"
 echo "CPU Temp:  $(vcgencmd measure_temp 2>/dev/null | cut -d= -f2 || echo 'n/a')"
-echo "Disk:      $(df -h /opt/screentinker 2>/dev/null | tail -1 | awk '{print $3 "/" $2 " (" $5 " used)"}')"
+echo "Disk:      $(df -h /opt/sli-signs 2>/dev/null | tail -1 | awk '{print $3 "/" $2 " (" $5 " used)"}')"
 echo "Memory:    $(free -h | awk '/Mem:/ {print $3 " / " $2}')"
 echo ""
 echo "Dashboard: http://${IP}:3001"
@@ -542,18 +542,18 @@ echo "Player:    http://${IP}:3001/player"
 echo "mDNS:      http://$(hostname).local:3001"
 echo ""
 STATUSEOF
-    chmod +x /usr/local/bin/screentinker-status
+    chmod +x /usr/local/bin/sli-signs-status
 
-    cat > /usr/local/bin/screentinker-logs << 'LOGSEOF'
+    cat > /usr/local/bin/sli-signs-logs << 'LOGSEOF'
 #!/bin/bash
 case "${1:-server}" in
-    server) journalctl -u screentinker-server.service -f --no-hostname ;;
-    kiosk)  journalctl -u screentinker-kiosk.service -f --no-hostname ;;
-    all)    journalctl -u screentinker-server.service -u screentinker-kiosk.service -f --no-hostname ;;
-    *)      echo "Usage: screentinker-logs [server|kiosk|all]" ;;
+    server) journalctl -u sli-signs-server.service -f --no-hostname ;;
+    kiosk)  journalctl -u sli-signs-kiosk.service -f --no-hostname ;;
+    all)    journalctl -u sli-signs-server.service -u sli-signs-kiosk.service -f --no-hostname ;;
+    *)      echo "Usage: sli-signs-logs [server|kiosk|all]" ;;
 esac
 LOGSEOF
-    chmod +x /usr/local/bin/screentinker-logs
+    chmod +x /usr/local/bin/sli-signs-logs
 fi
 
 # ============================================================
@@ -570,9 +570,9 @@ cat > /etc/motd << 'MOTDEOF'
  Open-Source Digital Signage for Any Screen
 
  Commands:
-   screentinker-status   Show system info and URLs
-   screentinker-update   Pull latest and restart
-   screentinker-logs     Follow logs (server|kiosk|all)
+   sli-signs-status   Show system info and URLs
+   sli-signs-update   Pull latest and restart
+   sli-signs-logs     Follow logs (server|kiosk|all)
 
 MOTDEOF
 
@@ -594,7 +594,7 @@ fi
 # ============================================================
 echo ""
 echo -e "${GREEN}======================================${NC}"
-echo -e "${GREEN}   ScreenTinker Setup Complete!${NC}"
+echo -e "${GREEN}   SLI-Signs Setup Complete!${NC}"
 echo -e "${GREEN}======================================${NC}"
 echo ""
 
@@ -604,21 +604,21 @@ if [ "$PLAYER_ONLY" = false ]; then
     echo "Mode: All-in-One (server + player)"
     echo ""
     echo "After reboot this Pi will:"
-    echo "  - Start the ScreenTinker server on port $SCREENTINKER_PORT"
+    echo "  - Start the SLI-Signs server on port $SLI_SIGNS_PORT"
     echo "  - Display the player fullscreen on the connected screen"
     echo ""
     echo "First steps:"
     echo "  1. Reboot:  sudo reboot"
-    echo "  2. From your phone, go to http://${IP}:${SCREENTINKER_PORT}"
-    echo "     (or http://$(hostname).local:${SCREENTINKER_PORT})"
+    echo "  2. From your phone, go to http://${IP}:${SLI_SIGNS_PORT}"
+    echo "     (or http://$(hostname).local:${SLI_SIGNS_PORT})"
     echo "  3. Register - first user gets full admin access"
     echo "  4. Add a display and enter the pairing code from the TV"
     echo "  5. Upload content and push it to the screen"
     echo ""
     echo "Management:"
-    echo "  screentinker-status   Check everything is running"
-    echo "  screentinker-update   Update to latest version"
-    echo "  screentinker-logs     Watch server logs"
+    echo "  sli-signs-status   Check everything is running"
+    echo "  sli-signs-update   Update to latest version"
+    echo "  sli-signs-logs     Watch server logs"
 else
     echo "Mode: Player Only"
     echo "Server: $SERVER_URL"
@@ -630,15 +630,15 @@ else
     echo "To pair:"
     echo "  1. Reboot:  sudo reboot"
     echo "  2. The pairing screen will appear on the TV"
-    echo "  3. Enter the code in your ScreenTinker dashboard"
+    echo "  3. Enter the code in your SLI-Signs dashboard"
 fi
 
 echo ""
 echo "Services:"
 if [ "$PLAYER_ONLY" = false ]; then
-    echo "  sudo systemctl [start|stop|restart] screentinker-server"
+    echo "  sudo systemctl [start|stop|restart] sli-signs-server"
 fi
-echo "  sudo systemctl [start|stop|restart] screentinker-kiosk"
+echo "  sudo systemctl [start|stop|restart] sli-signs-kiosk"
 echo ""
 echo -e "${YELLOW}Reboot to start:  sudo reboot${NC}"
 echo ""

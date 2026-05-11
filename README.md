@@ -1,8 +1,8 @@
-# ScreenTinker
+# SLI-Signs
 
 Open-source digital signage management software. Control content on TVs, displays, and kiosks from anywhere.
 
-**Hosted version:** [screentinker.com](https://screentinker.com) — free tier available, no credit card required.
+**Hosted version:** [sli-signs.com](https://sli-signs.com) — free tier available, no credit card required.
 **Community:** [Discord](https://discord.gg/JHWQRPaG)
 
 ## Features
@@ -45,8 +45,8 @@ Android TV, Fire TV, Raspberry Pi, Windows, ChromeOS, LG webOS, Samsung Tizen, a
 ### Quick Start
 
 ```bash
-git clone https://github.com/screentinker/screentinker.git
-cd screentinker/server
+git clone https://github.com/sli-signs/sli-signs.git
+cd sli-signs/server
 npm install
 SELF_HOSTED=true node server.js
 ```
@@ -137,25 +137,25 @@ For production, put the app behind a reverse proxy (nginx, Caddy, etc.) with SSL
 
 ```bash
 # Create a dedicated user
-sudo useradd -r -s /bin/false screentinker
+sudo useradd -r -s /bin/false sli-signs
 
 # Copy the app
-sudo cp -r . /opt/screentinker
-sudo chown -R screentinker:screentinker /opt/screentinker
+sudo cp -r . /opt/sli-signs
+sudo chown -R sli-signs:sli-signs /opt/sli-signs
 
 # Install dependencies
-cd /opt/screentinker/server && npm install --production
+cd /opt/sli-signs/server && npm install --production
 
 # Create a systemd service
-sudo cat > /etc/systemd/system/screentinker.service << 'EOF'
+sudo cat > /etc/systemd/system/sli-signs.service << 'EOF'
 [Unit]
-Description=ScreenTinker
+Description=SLI-Signs
 After=network.target
 
 [Service]
 Type=simple
-User=screentinker
-WorkingDirectory=/opt/screentinker/server
+User=sli-signs
+WorkingDirectory=/opt/sli-signs/server
 ExecStart=/usr/bin/node server.js
 Restart=always
 Environment=PORT=3001
@@ -169,7 +169,7 @@ Environment=SELF_HOSTED=true
 WantedBy=multi-user.target
 EOF
 
-sudo systemctl enable --now screentinker
+sudo systemctl enable --now sli-signs
 ```
 
 #### Nginx Example
@@ -209,7 +209,7 @@ server {
 To update a running instance to the latest version:
 
 ```bash
-cd /opt/screentinker
+cd /opt/sli-signs
 
 # Back up the database first
 sqlite3 server/db/remote_display.db ".backup server/db/backup-$(date +%F).db"
@@ -221,19 +221,19 @@ git pull origin main
 cd server && npm install --production
 
 # Restart the service
-sudo systemctl restart screentinker
+sudo systemctl restart sli-signs
 ```
 
 If you deployed without git, you can initialize it:
 
 ```bash
-cd /opt/screentinker
+cd /opt/sli-signs
 git init
-git remote add origin https://github.com/screentinker/screentinker.git
+git remote add origin https://github.com/sli-signs/sli-signs.git
 git fetch origin main
 git checkout origin/main -- .
 cd server && npm install --production
-sudo systemctl restart screentinker
+sudo systemctl restart sli-signs
 ```
 
 Your database, uploads, and configuration are preserved — only code files are updated.
@@ -273,10 +273,10 @@ export KEY_PASSWORD=your_password
 ./gradlew assembleDebug
 ```
 
-The APK will be at `android/app/build/outputs/apk/debug/app-debug.apk`. Copy it to `server/` as `ScreenTinker.apk` to serve it from `/download/apk`:
+The APK will be at `android/app/build/outputs/apk/debug/app-debug.apk`. Copy it to `server/` as `SLI-Signs.apk` to serve it from `/download/apk`:
 
 ```bash
-cp android/app/build/outputs/apk/debug/app-debug.apk ScreenTinker.apk
+cp android/app/build/outputs/apk/debug/app-debug.apk SLI-Signs.apk
 ```
 
 To generate a new signing keystore:
@@ -289,9 +289,9 @@ keytool -genkey -v -keystore android/release-key.jks -keyalg RSA -keysize 2048 -
 
 ### Device Setup
 
-1. Register at your ScreenTinker instance
+1. Register at your SLI-Signs instance
 2. Go to **Displays** and click **Add Display**
-3. Install the ScreenTinker app on your device:
+3. Install the SLI-Signs app on your device:
    - **Android TV / tablets**: Download the APK from your instance (`/download/apk`) or build it from source (see above)
    - **Raspberry Pi**: `curl -sSL https://your-instance/scripts/raspberry-pi-setup.sh | bash`
    - **Windows**: Run the setup script from `scripts/windows-setup.bat`

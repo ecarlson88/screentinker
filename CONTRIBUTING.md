@@ -1,11 +1,11 @@
-# Contributing to ScreenTinker
+# Contributing to SLI-Signs
 
 Thanks for your interest in contributing! Here's how to get started.
 
 ## Getting Started
 
 1. Fork the repository
-2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/screentinker.git`
+2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/sli-signs.git`
 3. Install dependencies: `cd server && npm install`
 4. Start the dev server: `npm run dev`
 5. Open `http://localhost:3001`
@@ -46,7 +46,7 @@ Open an issue on GitHub with:
 
 ## Security
 
-If you discover a security vulnerability, please email **support@screentinker.com** instead of opening a public issue.
+If you discover a security vulnerability, please email **support@sli-signs.com** instead of opening a public issue.
 
 ## License
 
