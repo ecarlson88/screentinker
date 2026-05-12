@@ -1,0 +1,14 @@
+node_modules
+server/node_modules
+server/db
+server/uploads
+server/certs
+android
+.git
+.gitignore
+.claude
+.idea
+.vscode
+*.db
+*.db-wal
+*.db-shm

@@ -1,0 +1,35 @@
+services:
+  screentinker:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+      - "3443:3443"
+    volumes:
+      - db_data:/app/server/db
+      - uploads_data:/app/server/uploads
+      # Uncomment to mount SSL certificates:
+      # - ./certs:/app/server/certs:ro
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      HTTPS_PORT: 3443
+      # Set to true to give the first registered user full access (recommended for self-hosting)
+      SELF_HOSTED: "true"
+      # Set to true to prevent new user registrations after initial setup
+      DISABLE_REGISTRATION: "false"
+      # Set explicitly so sessions survive container restarts; auto-generated if blank
+      JWT_SECRET: ""
+      # Public URL of this instance — required for Stripe payment callbacks
+      APP_URL: ""
+      # --- Optional integrations ---
+      # STRIPE_SECRET_KEY: ""
+      # STRIPE_WEBHOOK_SECRET: ""
+      # GOOGLE_CLIENT_ID: ""
+      # MICROSOFT_CLIENT_ID: ""
+      # MICROSOFT_TENANT_ID: "common"
+      # EMAIL_WEBHOOK_URL: ""
+
+volumes:
+  db_data:
+  uploads_data:
