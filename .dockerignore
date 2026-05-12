@@ -1,6 +1,8 @@
 node_modules
 server/node_modules
-server/db
+server/db/*.db
+server/db/*.db-wal
+server/db/*.db-shm
 server/uploads
 server/certs
 android
