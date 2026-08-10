@@ -704,6 +704,8 @@ export async function render(container) {
             <div style="font-size:12px;color:var(--text-muted)">${esc(t('sso.domains_label'))}: ${esc(p.email_domains || '—')}</div>
           </div>
           <div style="display:flex;gap:6px;flex-shrink:0">
+            <button class="btn btn-secondary btn-sm" data-sso-test="${esc(p.id)}">${esc(t('sso.test'))}</button>
+            <button class="btn btn-secondary btn-sm" data-sso-edit="${esc(p.id)}">${esc(t('sso.edit'))}</button>
             <button class="btn btn-secondary btn-sm" data-sso-toggle="${esc(p.id)}" data-enabled="${p.enabled ? '1' : '0'}">
               ${esc(p.enabled ? t('sso.disable') : t('sso.enable'))}
             </button>
@@ -716,11 +718,126 @@ export async function render(container) {
           <div style="color:var(--text-muted)">${esc(t('sso.callback_label'))}</div>
           <code style="display:block;word-break:break-all;padding:6px;background:var(--bg-secondary);border-radius:4px">${esc(origin + p.callback_url)}</code>
         </div>
+
+        <!-- Editing is per provider, because an organization may have several (one per domain, or
+             one per identity provider after a merger) and they are configured independently. -->
+        <div id="ssoTest-${esc(p.id)}" style="display:none;margin-top:8px;font-size:12px"></div>
+        <div id="ssoEdit-${esc(p.id)}" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:none">
+          <div style="display:grid;gap:10px;max-width:560px">
+            <div class="form-group"><label>${esc(t('sso.f_name'))}</label>
+              <input type="text" class="input" data-f="name" value="${esc(p.name)}"></div>
+            <div class="form-group"><label>${esc(t('sso.f_issuer'))}</label>
+              <input type="url" class="input" data-f="issuer" value="${esc(p.issuer)}"></div>
+            <div class="form-group"><label>${esc(t('sso.f_client_id'))}</label>
+              <input type="text" class="input" data-f="client_id" value="${esc(p.client_id)}"></div>
+            <div class="form-group"><label>${esc(t('sso.f_client_secret'))}</label>
+              <input type="password" class="input" data-f="client_secret" autocomplete="new-password"
+                     placeholder="${esc(p.has_client_secret ? t('sso.secret_set') : t('sso.secret_none'))}">
+              <!-- A secret can never be shown back: the API does not return it. Blank therefore means
+                   "leave it alone" rather than "clear it", which is what stops a save from silently
+                   wiping a working configuration. Clearing is a separate, explicit choice. -->
+              <div style="font-size:11px;color:var(--text-muted);margin-top:4px">${esc(t('sso.secret_edit_hint'))}</div>
+              ${p.has_client_secret ? `
+              <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-top:6px">
+                <input type="checkbox" data-f="clear_secret"> ${esc(t('sso.secret_clear'))}
+              </label>` : ''}
+            </div>
+            <div class="form-group"><label>${esc(t('sso.f_domains'))}</label>
+              <input type="text" class="input" data-f="email_domains" value="${esc(p.email_domains)}"></div>
+            <div style="display:flex;gap:6px">
+              <button class="btn btn-primary btn-sm" data-sso-save="${esc(p.id)}">${esc(t('sso.save'))}</button>
+              <button class="btn btn-secondary btn-sm" data-sso-cancel="${esc(p.id)}">${esc(t('sso.cancel'))}</button>
+            </div>
+          </div>
+        </div>
       </div>`).join('');
 
     listEl.querySelectorAll('[data-sso-toggle]').forEach((btn) => {
       btn.addEventListener('click', async () => {
         await ssoRequest('PUT', `/${btn.dataset.ssoToggle}`, { enabled: btn.dataset.enabled !== '1' });
+      });
+    });
+    listEl.querySelectorAll('[data-sso-test]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.ssoTest;
+        const out = document.getElementById(`ssoTest-${id}`);
+        if (!out) return;
+        out.style.display = '';
+        out.textContent = t('sso.testing');
+        try {
+          const res = await fetch(`/api/organizations/${orgId}/sso/${id}/test`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+          });
+          const data = await res.json();
+          if (!res.ok) { out.textContent = data.error || t('sso.test_failed'); return; }
+          /*
+           * Literal keys, never a key built by concatenating a check name. Doing that defeats the
+           * check in server/test/i18n-keys-exist.js that every key an operator can see is
+           * translated — and a check name the UI does not know would render as raw key text. The
+           * fallback keeps an unknown one readable instead.
+           */
+          const CHECK_LABELS = {
+            discovery: t('sso.check_discovery'),
+            endpoints: t('sso.check_endpoints'),
+            signing_keys: t('sso.check_signing_keys'),
+          };
+          const rows = (data.checks || []).map((c) => `
+            <div>${c.ok ? '✅' : '❌'} ${esc(CHECK_LABELS[c.name] || c.name)} — <span style="color:var(--text-muted)">${esc(c.detail || '')}</span></div>`).join('');
+          /*
+           * The caveat is shown on SUCCESS, not tucked away. Discovery and keys prove the provider
+           * exists and that we could verify a token it signs — they say nothing about whether the
+           * client id, the secret, or the redirect URI registration are right. A green tick that
+           * implied "SSO works" would send an admin away from the one thing still to check.
+           */
+          out.innerHTML = rows + (data.ok
+            ? `<div style="margin-top:6px;color:var(--text-muted)">${esc(t('sso.test_caveat'))}</div>`
+            : '');
+        } catch {
+          out.textContent = t('sso.test_failed');
+        }
+      });
+    });
+    listEl.querySelectorAll('[data-sso-edit]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const panel = document.getElementById(`ssoEdit-${btn.dataset.ssoEdit}`);
+        if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+      });
+    });
+    listEl.querySelectorAll('[data-sso-cancel]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const panel = document.getElementById(`ssoEdit-${btn.dataset.ssoCancel}`);
+        if (panel) panel.style.display = 'none';
+      });
+    });
+    listEl.querySelectorAll('[data-sso-save]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const panel = document.getElementById(`ssoEdit-${btn.dataset.ssoSave}`);
+        if (!panel) return;
+        const val = (f) => panel.querySelector(`[data-f="${f}"]`)?.value?.trim() ?? '';
+        const body = {
+          name: val('name'),
+          issuer: val('issuer'),
+          client_id: val('client_id'),
+          email_domains: val('email_domains'),
+        };
+        /*
+         * Three states, and only these three:
+         *   typed a value        -> replace the secret
+         *   ticked "remove"      -> send '' so the server clears it
+         *   left blank, unticked -> send NOTHING, so the stored secret survives
+         * Sending '' on every save is the bug this shape exists to avoid.
+         */
+        const typed = panel.querySelector('[data-f="client_secret"]')?.value || '';
+        const clearing = panel.querySelector('[data-f="clear_secret"]')?.checked;
+        if (typed) body.client_secret = typed;
+        else if (clearing) body.client_secret = '';
+
+        if (!body.name || !body.issuer || !body.client_id) {
+          showToast(t('sso.missing_fields'), 'error');
+          return;
+        }
+        await ssoRequest('PUT', `/${btn.dataset.ssoSave}`, body);
       });
     });
     listEl.querySelectorAll('[data-sso-delete]').forEach((btn) => {

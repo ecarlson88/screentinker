@@ -44,12 +44,45 @@ const FETCH_TIMEOUT_MS = 8000;
 const discoveryCache = new Map();  // issuer -> { at, doc }
 const jwksCache = new Map();       // jwks_uri -> { at, keys }
 
+/*
+ * Every URL this module fetches is ultimately chosen by whoever configured the provider — and since
+ * per-org SSO, that is a CUSTOMER, not the operator. Discovery, JWKS and the token endpoint are
+ * therefore server-side request forgery primitives unless they are constrained.
+ *
+ * Two rules, both cheap:
+ *   https only        — an http:// target is a plaintext credential leak as well as a way to reach
+ *                       services that never expected a request from inside the network.
+ *   public hosts only — loopback, RFC1918, link-local (169.254.169.254 is cloud metadata) and the
+ *                       IPv6 equivalents are refused outright.
+ *
+ * ⚠️ This is a literal-address check, not full SSRF protection: a hostname that RESOLVES to a
+ * private address still passes, because refusing that needs resolve-then-pin plumbing that Node's
+ * fetch does not expose. It raises the bar from "type an internal URL" to "control public DNS",
+ * and the README says so rather than implying more.
+ */
+const BLOCKED_HOST = /^(localhost|.*\.localhost|127\.|0\.0\.0\.0|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?|\[?f[cd])/i;
+
+function assertFetchable(url) {
+  let u;
+  try { u = new URL(url); } catch { throw new Error(`not a URL: ${url}`); }
+  if (u.protocol !== 'https:') throw new Error('provider URLs must use https');
+  if (BLOCKED_HOST.test(u.hostname)) throw new Error('provider host is not publicly routable');
+  return u;
+}
+
 /** fetch with a timeout, because a hanging IdP must not hang a login forever. */
 async function getJson(url) {
+  assertFetchable(url);
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(url, { signal: ctl.signal, redirect: 'follow' });
+    /*
+     * redirect: 'manual' — following redirects would let an allowlisted host bounce us to a blocked
+     * one, which defeats the check above entirely. A provider that redirects its own well-known
+     * document is misconfigured, and saying so is more useful than quietly following it.
+     */
+    const res = await fetch(url, { signal: ctl.signal, redirect: 'manual' });
+    if (res.status >= 300 && res.status < 400) throw new Error(`${url} redirected; provider URLs must be final`);
     if (!res.ok) throw new Error(`${url} responded ${res.status}`);
     return await res.json();
   } finally {
@@ -192,7 +225,8 @@ async function exchangeCode({ issuer, clientId, clientSecret, code, redirectUri,
   const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
   let payload;
   try {
-    const res = await fetch(doc.token_endpoint, { method: 'POST', headers, body, signal: ctl.signal });
+    assertFetchable(doc.token_endpoint);
+    const res = await fetch(doc.token_endpoint, { method: 'POST', headers, body, signal: ctl.signal, redirect: 'manual' });
     payload = await res.json().catch(() => ({}));
     if (!res.ok) {
       // The provider's own error is far more useful than "exchange failed" — a wrong redirect_uri
@@ -213,8 +247,17 @@ function _resetCaches() {
   jwksCache.clear();
 }
 
+/**
+ * The provider's published keys, straight from the document. Used by the configuration test so an
+ * admin learns at setup time that a provider publishes no signing keys, rather than at first login.
+ */
+async function fetchJwks(jwksUri) {
+  return getJson(jwksUri);
+}
+
 module.exports = {
   discover,
+  fetchJwks,
   verifyIdToken,
   exchangeCode,
   createPkce,

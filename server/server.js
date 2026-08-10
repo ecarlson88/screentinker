@@ -576,7 +576,12 @@ app.use('/api/auth/resend-verification', rateLimit(60000, 5));
 // Domain lookup is unauthenticated by necessity (it runs before login). Rate limited so it
 // cannot be walked to enumerate which customers use SSO.
 app.use('/api/auth/sso/discover', rateLimit(60000, 10));
-app.use('/api/auth/sso/start', rateLimit(60000, 10));
+// 10/min was wrong for this one: org SSO is used by companies behind a SINGLE corporate egress IP,
+// and this is their only entry point, so the 11th employee of the morning met a raw JSON 429 with no
+// login page. It is a redirect, not a credential check.
+app.use('/api/auth/sso/start', rateLimit(60000, 120));
+// The OIDC endpoints had no limit at all, which left the callback's parsing as a free amplifier.
+app.use('/api/auth/oidc', rateLimit(60000, 120));
 // Self-service password reset. The request endpoint is the spray surface (it sends mail to
 // an address the caller supplies), so it gets the tighter cap; the redeem endpoint is a
 // 32-byte-token guess, capped mostly to keep the bcrypt work bounded.

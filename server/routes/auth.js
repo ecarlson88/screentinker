@@ -841,6 +841,8 @@ router.post('/accept-invite/:inviteId', requireAuth, (req, res) => {
 // The transaction is held in a short-lived signed cookie rather than server memory so that a
 // restart mid-login, or a second server process, does not strand the user on a dead state.
 const OIDC_TX_COOKIE = 'st_oidc_tx';
+// Holds a completed session for the seconds between the provider redirect and the page claiming it.
+const SSO_CLAIM_COOKIE = 'st_sso_claim';
 const OIDC_TX_TTL_S = 600;
 
 function readCookie(req, name) {
@@ -926,9 +928,11 @@ router.get('/oidc/:slug/start', async (req, res) => {
     const state = oidc.randomToken();
 
     const tx = jwt.sign(
-      { slug: provider.slug, nonce, verifier: pkce.verifier, state },
+      { typ: 'oidc-tx', slug: provider.slug, nonce, verifier: pkce.verifier, state },
       config.jwtSecret,
-      { expiresIn: OIDC_TX_TTL_S },
+      // HS256 explicitly, and a `typ` the session verifier does not accept: two token kinds signed
+      // with one secret must never be interchangeable, even if today only `slug` happens to stop it.
+      { expiresIn: OIDC_TX_TTL_S, algorithm: 'HS256' },
     );
     res.cookie(OIDC_TX_COOKIE, tx, {
       httpOnly: true,
@@ -970,7 +974,8 @@ router.get('/oidc/:slug/callback', async (req, res) => {
 
   let tx;
   try {
-    tx = jwt.verify(raw, config.jwtSecret);
+    tx = jwt.verify(raw, config.jwtSecret, { algorithms: ['HS256'] });
+    if (tx.typ !== 'oidc-tx') throw new Error('not a login transaction');
   } catch {
     return backToApp(res, { sso_error: 'expired' });
   }
@@ -979,8 +984,18 @@ router.get('/oidc/:slug/callback', async (req, res) => {
   // Compared in constant time so a wrong state cannot be discovered a character at a time.
   const got = String(req.query.state || '');
   const want = String(tx.state || '');
-  const sameLength = got.length === want.length;
-  if (!sameLength || !crypto.timingSafeEqual(Buffer.from(got), Buffer.from(want))) {
+  /*
+   * Compared as BYTES, not characters.
+   *
+   * `got.length` is UTF-16 code units; Buffer.from() produces UTF-8 bytes. A state of 43 characters
+   * containing one multi-byte character is 43 chars but 44 bytes, so the guard passed and
+   * timingSafeEqual threw ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH — inside an async handler, which
+   * Express 4 does not catch, which server.js turns into process.exit. One crafted request per
+   * restart was enough to take an instance down.
+   */
+  const gotBuf = Buffer.from(got, 'utf8');
+  const wantBuf = Buffer.from(want, 'utf8');
+  if (gotBuf.length !== wantBuf.length || !crypto.timingSafeEqual(gotBuf, wantBuf)) {
     return backToApp(res, { sso_error: 'bad_state' });
   }
   if (tx.slug !== provider.slug) return backToApp(res, { sso_error: 'bad_state' });
@@ -1008,13 +1023,40 @@ router.get('/oidc/:slug/callback', async (req, res) => {
 
   const email = String(claims.email || '').toLowerCase().trim();
   if (!email) return backToApp(res, { sso_error: 'no_email' });
+
+  /*
+   * ⚠️ AN ORGANIZATION'S PROVIDER MAY ONLY SPEAK FOR ITS OWN DOMAINS.
+   *
+   * Without this, per-org SSO is an account-takeover primitive, demonstrated end to end twice in
+   * review: any org owner can point us at an identity provider they fully control, and such a
+   * provider can assert ANY email with email_verified:true — including a platform_admin's. Every
+   * check passes honestly, because the attacker IS the issuer.
+   *
+   * Instance-wide providers are exempt: the OPERATOR chose them, which is the trust they have
+   * always had. An org provider is chosen by a customer, so it is confined to the domains that
+   * customer registered — and a domain cannot be registered while another organization holds it.
+   *
+   * ⚠️ This bounds the damage to domains a tenant claimed; it does NOT prove they own them.
+   * Claiming an unheld public domain is still possible and needs DNS verification. See the README.
+   */
+  if (provider.organizationId) {
+    const at = email.lastIndexOf('@');
+    const domain = at === -1 ? '' : email.slice(at + 1);
+    const allowed = String(provider.emailDomains || '').split(',').map((d) => d.trim()).filter(Boolean);
+    if (!domain || !allowed.includes(domain)) {
+      console.warn(`[oidc] ${provider.slug} asserted ${email}, outside its domains [${allowed.join(', ')}]`);
+      return backToApp(res, { sso_error: 'domain_not_allowed' });
+    }
+  }
   /*
    * An unverified email is refused. The whole account model keys on email — linking, invites,
    * password reset — so accepting an address the provider itself will not vouch for would let
    * anyone who can type an address into a sloppy IdP arrive as its owner. Providers that omit the
    * claim entirely are treated as "not asserted", which is the same answer.
    */
-  if (claims.email_verified === false) return backToApp(res, { sso_error: 'email_unverified' });
+  // `=== false` accepted an OMITTED claim, which is the opposite of what the comment above says and
+  // what Azure AD v2 actually sends (it omits it). Absent means not asserted, which is not verified.
+  if (claims.email_verified !== true) return backToApp(res, { sso_error: 'email_unverified' });
 
   try {
     const result = upsertFederatedUser({ claims, email, provider, req });
@@ -1046,11 +1088,55 @@ router.get('/oidc/:slug/callback', async (req, res) => {
     const workspaceId = ensureDefaultOrgForUser(user, { allowCreate: config.autoCreateOrgOnSignup });
     const token = generateToken(user, workspaceId);
     if (isNew) sendSignupEmails(user, req);
-    backToApp(res, { sso_token: token });
+
+    /*
+     * ⚠️ The session token is NOT put in the redirect URL.
+     *
+     * An earlier version returned it in the fragment. That is a login-CSRF hole: anyone could send
+     * a victim `/app#/login?sso_token=<their own token>` and the page would install it, silently
+     * signing that person into the ATTACKER'S account — after which their uploads, playlists and
+     * settings all land somewhere the attacker can read.
+     *
+     * Instead the token goes into a one-shot httpOnly cookie that only this origin can set, and the
+     * page exchanges it at /sso/claim. A link cannot forge that cookie, so a token can only be
+     * claimed by the browser that actually completed the login.
+     */
+    res.cookie(SSO_CLAIM_COOKIE, token, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: req.protocol === 'https',
+      maxAge: 120 * 1000,
+      path: '/api/auth',
+    });
+    backToApp(res, { sso: '1' });
   } catch (err) {
     console.error(`[oidc] ${provider.slug} sign-in failed:`, err.message);
     backToApp(res, { sso_error: 'server_error' });
   }
+});
+
+/*
+ * Exchange the one-shot cookie for the session token.
+ *
+ * POST so it cannot be triggered by a link or an <img>, and the cookie is cleared on the way out so
+ * a second attempt gets nothing — a token that leaks from a log or a back button is already spent.
+ */
+router.post('/sso/claim', (req, res) => {
+  const token = readCookie(req, SSO_CLAIM_COOKIE);
+  res.clearCookie(SSO_CLAIM_COOKIE, { path: '/api/auth' });
+  if (!token) return res.status(401).json({ error: 'No sign-in to complete' });
+
+  let claims;
+  try {
+    claims = jwt.verify(token, config.jwtSecret);
+  } catch {
+    return res.status(401).json({ error: 'That sign-in has expired' });
+  }
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(claims.id);
+  if (!user) return res.status(401).json({ error: 'That sign-in has expired' });
+
+  const { password_hash, totp_secret_enc, totp_last_step, ...safeUser } = user;
+  res.json({ token, user: safeUser, current_workspace_id: claims.current_workspace_id || null });
 });
 
 /*
@@ -1082,6 +1168,16 @@ function upsertFederatedUser({ claims, email, provider, req }) {
 
   if (existing.auth_provider !== provider.slug) {
     if (existing.password_hash) return { error: 'account_exists_local' };
+    /*
+     * `password_hash IS NULL` was the wrong test for "safe to relink". Every SSO-created account has
+     * a null password, so it meant "any federated account may be adopted by whichever provider spoke
+     * last" — fine when the operator chose them all, an account takeover once a customer can add
+     * one. An ORG provider therefore never adopts an account another provider established; the user
+     * links it deliberately instead.
+     */
+    if (provider.organizationId && existing.auth_provider && existing.auth_provider !== 'local') {
+      return { error: 'account_exists_other_provider' };
+    }
     db.prepare('UPDATE users SET auth_provider = ?, provider_id = ?, avatar_url = ? WHERE id = ?')
       .run(provider.slug, String(claims.sub), claims.picture || existing.avatar_url, existing.id);
     return { user: db.prepare('SELECT * FROM users WHERE id = ?').get(existing.id), isNew: false };

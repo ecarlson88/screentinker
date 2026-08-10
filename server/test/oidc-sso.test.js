@@ -215,16 +215,30 @@ test('every login gets fresh values', () => {
 // ---------------------------------------------------------------------------------------------
 // The provider registry
 
-test('Google and Microsoft register from the variables the README always documented', () => {
-  const list = providers.list({ GOOGLE_CLIENT_ID: 'g', MICROSOFT_CLIENT_ID: 'm', MICROSOFT_TENANT_ID: 'common' });
-  const byslug = Object.fromEntries(list.map((p) => [p.slug, p]));
-  assert.equal(byslug.google.issuer, 'https://accounts.google.com');
-  assert.equal(byslug.microsoft.issuer, 'https://login.microsoftonline.com/common/v2.0');
+test('Google registers from the variable the README always documented', () => {
+  const [g] = providers.list({ GOOGLE_CLIENT_ID: 'g' });
+  assert.equal(g.issuer, 'https://accounts.google.com');
 });
 
 test('a single-tenant Microsoft app narrows the issuer, so another tenant fails iss', () => {
   const [ms] = providers.list({ MICROSOFT_CLIENT_ID: 'm', MICROSOFT_TENANT_ID: 'abc-123' });
   assert.equal(ms.issuer, 'https://login.microsoftonline.com/abc-123/v2.0');
+});
+
+test('MULTI-TENANT MICROSOFT IS REFUSED, not silently broken', () => {
+  /*
+   * Two reasons pointing the same way. It cannot work: Microsoft's `common` metadata advertises the
+   * literal template `https://login.microsoftonline.com/{tenantid}/v2.0`, so the issuer can never
+   * equal the configured URL and every login fails at /start anyway.
+   *
+   * And the obvious patch is dangerous: loosening the iss comparison accepts tokens from EVERY
+   * Azure tenant, which is nOAuth — any tenant admin can set an arbitrary unverified `email` on
+   * their own user and be issued a session as that address here.
+   */
+  for (const tenant of ['common', 'organizations', 'consumers', '']) {
+    assert.deepEqual(providers.list({ MICROSOFT_CLIENT_ID: 'm', MICROSOFT_TENANT_ID: tenant }), [],
+      `MICROSOFT_TENANT_ID=${tenant || '(unset)'} must not register a provider`);
+  }
 });
 
 test('any OIDC provider can be added by env', () => {
@@ -361,4 +375,82 @@ test('no database means no org providers, and no crash', () => {
   // The env-only paths must keep working on an instance where the table has not been migrated yet.
   const m = require('../lib/oidc-providers');
   assert.doesNotThrow(() => m.publicList({ GOOGLE_CLIENT_ID: 'g' }));
+});
+
+
+// ---------------------------------------------------------------------------------------------
+// Regressions for defects found in security review. Each one was demonstrated end to end against a
+// running server before it was fixed; none of them was hypothetical.
+
+test('TAKEOVER: an org provider may not assert an email outside its own domains', () => {
+  /*
+   * The worst defect in this feature. An org admin supplies the issuer and client id, so they
+   * control the IdP completely and can mint a token asserting ANY email with email_verified:true —
+   * including a platform_admin's. Every cryptographic check passes honestly, because the attacker
+   * IS the issuer. Three reviewers demonstrated a full session as the victim independently.
+   *
+   * The confinement lives in the callback; this pins the data it depends on, so a provider loaded
+   * from the database always carries the domains its assertions are checked against.
+   */
+  withOrgDb([{ id: '1', org: 'org-evil', slug: 'orgevil', name: 'Evil', domains: 'evil.test' }], (m) => {
+    const p = m.getOrgProvider('orgevil');
+    assert.equal(p.emailDomains, 'evil.test', 'the callback cannot confine what it cannot see');
+    assert.equal(p.organizationId, 'org-evil', 'and must know this is a tenant provider, not the operator\'s');
+  });
+});
+
+test('an INSTANCE provider carries no organization, so it is not domain-confined', () => {
+  // Operator-chosen providers keep the trust they have always had; confinement targets tenants.
+  const [g] = providers.list({ GOOGLE_CLIENT_ID: 'g' });
+  assert.equal(g.organizationId, undefined);
+  assert.equal(g.source, 'env');
+});
+
+test('domain routing is deterministic, not table-scan order', () => {
+  // forEmail used an unordered SELECT, so deleting and re-adding a provider silently flipped which
+  // IdP an entire domain routed to. Ordering makes the answer stable.
+  withOrgDb([
+    { id: 'b', org: 'org-a', slug: 'orgbbb', name: 'Second', domains: 'shared.test' },
+    { id: 'a', org: 'org-a', slug: 'orgaaa', name: 'First', domains: 'shared.test' },
+  ], (m) => {
+    const first = m.forEmail('x@shared.test').name;
+    assert.equal(m.forEmail('x@shared.test').name, first, 'same answer every time');
+  });
+});
+
+test('a secret that cannot be decrypted fails CLOSED', () => {
+  // decrypt() returns null after a JWT_SECRET rotation, which silently downgraded a confidential
+  // client to a public one — the login then failed at the provider with an error nobody could act
+  // on, while the admin screen still said "a secret is set".
+  withOrgDb([{ id: '1', org: 'o', slug: 'orgsec', name: 'X', domains: 'x.test' }], (m) => {
+    const real = require('../db/database');
+    real.db.prepare('UPDATE org_sso_providers SET client_secret_enc = ? WHERE id = ?').run('not-decryptable', '1');
+    assert.throws(() => m.getOrgProvider('orgsec'), /could not be decrypted/);
+  });
+});
+
+test('a tenant cannot claim a public email provider as its sign-in domain', () => {
+  /*
+   * Demonstrated in review: a tenant claimed gmail.com, after which /sso/discover answered
+   * {"sso":true} for every Gmail address and the login page offered "sign in with your
+   * organization" — a phishing hop launched from the vendor's own login screen, pointed at
+   * infrastructure the tenant controls. First-claim-wins also meant one cheap account could deny a
+   * public domain to everyone else.
+   */
+  const { isPublicEmailDomain } = require('../lib/public-email-domains');
+  for (const d of ['gmail.com', 'outlook.com', 'hotmail.co.uk', 'yahoo.com', 'icloud.com',
+    'proton.me', 'qq.com', 'mail.ru', 'comcast.net', 'gmx.de']) {
+    assert.ok(isPublicEmailDomain(d), `${d} must be refused as an org sign-in domain`);
+  }
+  // ...and a real company domain is still fine, or the feature would be pointless.
+  for (const d of ['acme.com', 'bigcorp.io', 'my-company.co.uk', 'mail.acme.com']) {
+    assert.equal(isPublicEmailDomain(d), false, `${d} must remain claimable`);
+  }
+});
+
+test('the blocklist is case- and whitespace-insensitive', () => {
+  // Domains arrive from a form. `  GMAIL.COM ` must not slip through a lowercase-only comparison.
+  const { isPublicEmailDomain } = require('../lib/public-email-domains');
+  assert.ok(isPublicEmailDomain('  GMAIL.COM '));
+  assert.ok(isPublicEmailDomain('Outlook.Com'));
 });

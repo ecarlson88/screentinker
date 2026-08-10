@@ -1,5 +1,6 @@
 import { showToast } from '../components/toast.js';
 import { t } from '../i18n.js';
+import { esc } from '../utils.js';
 
 
 /*
@@ -196,10 +197,10 @@ export async function render(container) {
                self-hoster's Keycloak or Authentik still gets a real-looking button. -->
           ${(config.providers || []).map((p) => `
           <a class="btn btn-secondary" href="/api/auth/oidc/${encodeURIComponent(p.slug)}/start"
-             id="sso-${p.slug}"
+             id="sso-${esc(p.slug)}"
              style="width:100%;justify-content:center;padding:10px;gap:8px;margin-top:8px;text-decoration:none">
             ${providerIcon(p.slug)}
-            <span></span>${t('auth.signin_with').replace('{provider}', p.name)}
+            ${esc(t('auth.signin_with', { provider: p.name }))}
           </a>
           `).join('')}
           </div>
@@ -504,10 +505,12 @@ function setupHandlers(config, isSetup) {
     // Nothing to ask about until there is a domain with a dot in it.
     if (!domain || !domain.includes('.')) { slot.style.display = 'none'; slot.innerHTML = ''; lastDomainAsked = ''; return; }
     if (domain === lastDomainAsked) return;
-    lastDomainAsked = domain;
     try {
       const res = await fetch(`/api/auth/sso/discover?email=${encodeURIComponent(email)}`);
       const data = await res.json();
+      // Remembered only after a SUCCESSFUL answer. Recording it before the fetch meant a 5xx or a
+      // tripped rate limit poisoned that domain for the rest of the page's life.
+      lastDomainAsked = domain;
       if (!data.sso) { slot.style.display = 'none'; slot.innerHTML = ''; return; }
       /*
        * A FORM, not a link, and a deliberately generic label.
@@ -541,23 +544,38 @@ function setupHandlers(config, isSetup) {
     ssoLookupTimer = setTimeout(() => lookupOrgSso(value), 400);
   });
 
+  /*
+   * Completing an SSO login.
+   *
+   * The callback no longer hands the session token back in the URL — that was a login-CSRF hole,
+   * because a crafted link could install an ATTACKER'S token and quietly sign the victim into their
+   * account. The server now leaves it in a one-shot httpOnly cookie and we exchange it here, which
+   * a link cannot forge.
+   *
+   * Wrapped in an async IIFE because setupHandlers() is not async; `await` at this level is a
+   * SyntaxError that takes the whole module graph down with it, since app.js imports this file
+   * statically and there is no bundler to catch it first.
+   */
   const ssoParams = new URLSearchParams((window.location.hash.split('?')[1] || ''));
-  const ssoToken = ssoParams.get('sso_token');
+  const ssoReturning = ssoParams.get('sso') === '1';
   const ssoError = ssoParams.get('sso_error');
 
-  if (ssoToken || ssoError) {
-    history.replaceState(null, '', window.location.pathname + '#/login');
+  if (ssoReturning || ssoError) {
+    // Keep any real query string; only the hash carried the SSO markers.
+    history.replaceState(null, '', window.location.pathname + window.location.search + '#/login');
   }
 
-  if (ssoToken) {
-    try {
-      const meRes = await fetch('/api/auth/me', { headers: { Authorization: `Bearer ${ssoToken}` } });
-      if (!meRes.ok) throw new Error('session rejected');
-      const me = await meRes.json();
-      onAuthSuccess({ token: ssoToken, user: me.user || me });
-    } catch {
-      showToast(t('auth.sso_failed'), 'error');
-    }
+  if (ssoReturning) {
+    (async () => {
+      try {
+        const res = await fetch('/api/auth/sso/claim', { method: 'POST' });
+        if (!res.ok) throw new Error('claim rejected');
+        const data = await res.json();
+        onAuthSuccess(data);
+      } catch {
+        showToast(t('auth.sso_failed'), 'error');
+      }
+    })();
   } else if (ssoError) {
     // Every code the callback can emit has a message; an unknown one still says something true
     // rather than failing silently, which is how the previous implementation behaved on every click.

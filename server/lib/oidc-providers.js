@@ -74,20 +74,45 @@ function list(env = process.env) {
 
   const msId = (env.MICROSOFT_CLIENT_ID || '').trim();
   if (msId) {
-    // `common` lets any Microsoft account in, which is what multi-tenant means and is the documented
-    // default. A single-tenant deployment sets the tenant GUID and the issuer narrows with it, so a
-    // token from another tenant then fails the iss check rather than being silently accepted.
-    const tenant = (env.MICROSOFT_TENANT_ID || 'common').trim() || 'common';
-    out.push({
-      slug: 'microsoft',
-      name: 'Microsoft',
-      issuer: `https://login.microsoftonline.com/${tenant}/v2.0`,
-      clientId: msId,
-      clientSecret: (env.MICROSOFT_CLIENT_SECRET || '').trim() || null,
-      scopes: DEFAULT_SCOPES,
-      source: 'env',
-    });
-    seen.add('microsoft');
+    /*
+     * ⚠️ A TENANT GUID IS REQUIRED. `common` and `organizations` are refused, for two reasons that
+     * point the same way.
+     *
+     * It does not work: Microsoft's multi-tenant metadata advertises
+     * `https://login.microsoftonline.com/{tenantid}/v2.0` — a literal template — so the issuer can
+     * never equal the configured URL and every login fails at /start regardless.
+     *
+     * And the obvious patch is dangerous: loosening the `iss` comparison to accept the template
+     * means accepting tokens from EVERY Azure tenant, which is nOAuth — an admin of any tenant can
+     * set an arbitrary, unverified `email` on one of their own users and be issued a session as that
+     * address here. Doing multi-tenant Microsoft safely needs per-tenant pinning (validate `tid`
+     * against an allowlist and key the account on `oid`+`tid`, not on email), which is a feature,
+     * not a relaxed regex.
+     *
+     * So: refuse loudly at boot rather than ship a login that either never works or works too well.
+     */
+    const rawTenant = (env.MICROSOFT_TENANT_ID || '').trim().toLowerCase();
+    if (!rawTenant || ['common', 'organizations', 'consumers'].includes(rawTenant)) {
+      if (!list._warned) {
+        console.warn('[sso] MICROSOFT_CLIENT_ID is set but MICROSOFT_TENANT_ID is missing or multi-tenant '
+          + `(${rawTenant || 'unset'}). Microsoft sign-in is DISABLED: set your tenant GUID. See README.`);
+        list._warned = true;
+      }
+      seen.add('microsoft');
+    } else {
+      out.push({
+        slug: 'microsoft',
+        name: 'Microsoft',
+        // A tenant GUID narrows the issuer to that tenant, so a token from any other tenant fails
+        // the `iss` check instead of being quietly accepted.
+        issuer: `https://login.microsoftonline.com/${rawTenant}/v2.0`,
+        clientId: msId,
+        clientSecret: (env.MICROSOFT_CLIENT_SECRET || '').trim() || null,
+        scopes: DEFAULT_SCOPES,
+        source: 'env',
+      });
+      seen.add('microsoft');
+    }
   }
 
   for (const raw of String(env.OIDC_PROVIDERS || '').split(',')) {
@@ -143,10 +168,19 @@ function rowToProvider(row, secretbox) {
     name: row.name,
     issuer: String(row.issuer).replace(/\/+$/, ''),
     clientId: row.client_id,
-    clientSecret: row.client_secret_enc ? secretbox.decrypt(row.client_secret_enc) : null,
+    /*
+     * Fail CLOSED. secretbox.decrypt returns null when the key has rotated, which silently turned a
+     * confidential client into a public one — the login then fails at the provider with an error
+     * nobody can act on, while the admin screen still says "a secret is set".
+     */
+    clientSecret: row.client_secret_enc
+      ? (secretbox.decrypt(row.client_secret_enc) ?? (() => { throw new Error('client secret could not be decrypted — re-enter it'); })())
+      : null,
     scopes: row.scopes || DEFAULT_SCOPES,
     source: 'org',
     organizationId: row.organization_id,
+    // Carried so the callback can refuse an assertion outside the domains this customer registered.
+    emailDomains: row.email_domains || '',
   };
 }
 
@@ -158,7 +192,16 @@ function getOrgProvider(slug) {
     const row = conn.prepare('SELECT * FROM org_sso_providers WHERE slug = ? AND enabled = 1').get(String(slug));
     if (!row) return null;
     return rowToProvider(row, require('./secretbox'));
-  } catch { return null; }   // table not migrated yet
+  } catch (e) {
+    /*
+     * Only "the table is not there yet" is a null. This catch used to swallow EVERYTHING, which
+     * turned a secret that could not be decrypted back into a silent success — the exact failure the
+     * fail-closed check above exists to prevent. Anything else propagates so it is logged and the
+     * login fails loudly.
+     */
+    if (/no such table/i.test(e.message)) return null;
+    throw e;
+  }
 }
 
 /**
@@ -179,7 +222,7 @@ function forEmail(email) {
   const domain = String(email).slice(at + 1).toLowerCase().trim();
   if (!domain) return null;
   try {
-    const rows = conn.prepare("SELECT * FROM org_sso_providers WHERE enabled = 1 AND email_domains != ''").all();
+    const rows = conn.prepare("SELECT * FROM org_sso_providers WHERE enabled = 1 AND email_domains != '' ORDER BY created_at, id").all();
     const secretbox = require('./secretbox');
     for (const row of rows) {
       const domains = String(row.email_domains || '').split(',').map((d) => d.trim().toLowerCase()).filter(Boolean);

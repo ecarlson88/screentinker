@@ -21,6 +21,7 @@ const { resolveTenancy } = require('../lib/tenancy');
 const secretbox = require('../lib/secretbox');
 const oidc = require('../lib/oidc');
 const { logActivity, getClientIp } = require('../services/activity');
+const { isPublicEmailDomain } = require('../lib/public-email-domains');
 
 /*
  * Only an org owner/admin may configure how their people sign in — it is the most security-relevant
@@ -80,6 +81,18 @@ function normaliseDomains(raw) {
     if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(d)) {
       throw new Error(`"${part.trim()}" is not a valid email domain`);
     }
+    /*
+     * A consumer mailbox provider is never an organization's sign-in domain, and claiming one is an
+     * attack rather than a mistake: every Gmail or Outlook user typing their address into this
+     * product's login page would be offered a "sign in with your organization" button pointing at
+     * one tenant's infrastructure. It also lets one cheap account deny a public domain to everyone.
+     */
+    if (isPublicEmailDomain(d)) {
+      const e = new Error(`${d} is a public email provider and cannot be used as a sign-in domain. `
+        + 'Use a domain your organization owns.');
+      e.status = 400;
+      throw e;
+    }
     seen.add(d);
   }
   return [...seen].join(',');
@@ -100,8 +113,13 @@ function assertDomainsFree(domains, orgId, excludeId) {
     if (row.id === excludeId) continue;
     const held = String(row.email_domains).split(',');
     for (const d of wanted) {
-      if (held.includes(d) && row.organization_id !== orgId) {
-        const e = new Error(`the domain ${d} is already used for sign-in by another organization`);
+      if (held.includes(d)) {
+        // Same-org duplicates were allowed and should not have been: two providers claiming one
+        // domain makes routing depend on table-scan order, so half a company's staff get sent to an
+        // identity provider that has never heard of them.
+        const e = new Error(row.organization_id === orgId
+          ? `the domain ${d} is already used by another of your providers`
+          : `the domain ${d} is already used for sign-in by another organization`);
         e.status = 409;
         throw e;
       }
@@ -145,14 +163,28 @@ router.post('/:orgId/sso', requireOrgAdmin, async (req, res) => {
 
   const id = crypto.randomUUID();
   const slug = newSlug();
-  db.prepare(`
-    INSERT INTO org_sso_providers (id, organization_id, slug, name, issuer, client_id, client_secret_enc, scopes, email_domains, enabled)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-  `).run(id, req.orgId, slug, String(name).trim(), String(issuer).trim().replace(/\/+$/, ''), String(clientId).trim(),
-    clientSecret ? secretbox.encrypt(String(clientSecret)) : null,
-    String(scopes || 'openid email profile').trim(), cleanDomains);
+  /*
+   * Re-check the domains INSIDE the transaction. The first check happened before `await
+   * oidc.discover()`, which yields the event loop for a network round trip the caller's own IdP
+   * controls the length of — two admins racing that window both passed and both got the domain,
+   * after which routing became whichever row the scan reached first.
+   */
+  try {
+    db.transaction(() => {
+      assertDomainsFree(cleanDomains, req.orgId, null);
+      db.prepare(`
+        INSERT INTO org_sso_providers (id, organization_id, slug, name, issuer, client_id, client_secret_enc, scopes, email_domains, enabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+      `).run(id, req.orgId, slug, String(name).trim(), String(issuer).trim().replace(/\/+$/, ''), String(clientId).trim(),
+        clientSecret ? secretbox.encrypt(String(clientSecret)) : null,
+        String(scopes || 'openid email profile').trim(), cleanDomains);
+    })();
+  } catch (e) {
+    return res.status(e.status || 500).json({ error: e.message });
+  }
 
-  logActivity(req.user.id, 'org_sso_created', `${name} (${slug})`, req.orgId, getClientIp(req));
+  // (userId, action, details, deviceId, ipAddress, workspaceId) — the org id is NOT the 4th arg.
+  logActivity(req.user.id, 'org_sso_created', `${name} (${slug}) org=${req.orgId}`, null, getClientIp(req));
   res.status(201).json(toPublic(db.prepare('SELECT * FROM org_sso_providers WHERE id = ?').get(id)));
 });
 
@@ -202,15 +234,74 @@ router.put('/:orgId/sso/:id', requireOrgAdmin, async (req, res) => {
     existing.id,
   );
 
-  logActivity(req.user.id, 'org_sso_updated', `${existing.name} (${existing.slug})`, req.orgId, getClientIp(req));
+  logActivity(req.user.id, 'org_sso_updated', `${existing.name} (${existing.slug}) org=${req.orgId}`, null, getClientIp(req));
   res.json(toPublic(db.prepare('SELECT * FROM org_sso_providers WHERE id = ?').get(existing.id)));
+});
+
+/*
+ * Check a provider without making anyone log in.
+ *
+ * The overwhelmingly common failure is a configuration one — an issuer that is a company home page
+ * rather than an OIDC issuer, a provider that is unreachable from the server, a JWKS with no signing
+ * keys — and every one of those currently surfaces as a user staring at a failed login with an
+ * error that says nothing useful. This turns that into an answer at configuration time.
+ *
+ * ⚠️ It is deliberately honest about its limits. Discovery and JWKS prove the provider EXISTS and
+ * that we could verify a token it signed. They cannot prove the client id is right, that the secret
+ * matches, or that the redirect URI is registered — only a real authorization round trip does that,
+ * and the response says so rather than implying a green tick means "SSO works".
+ */
+router.post('/:orgId/sso/:id/test', requireOrgAdmin, async (req, res) => {
+  const row = db.prepare('SELECT * FROM org_sso_providers WHERE id = ? AND organization_id = ?').get(req.params.id, req.orgId);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+
+  const checks = [];
+  let doc = null;
+  try {
+    doc = await oidc.discover(row.issuer);
+    checks.push({ name: 'discovery', ok: true, detail: doc.issuer });
+  } catch (e) {
+    checks.push({ name: 'discovery', ok: false, detail: e.message });
+    return res.json({ ok: false, checks });
+  }
+
+  checks.push({
+    name: 'endpoints',
+    ok: !!(doc.authorization_endpoint && doc.token_endpoint),
+    detail: doc.authorization_endpoint || 'missing authorization_endpoint',
+  });
+
+  try {
+    const jwks = await oidc.fetchJwks(doc.jwks_uri);
+    const signing = (jwks.keys || []).filter((k) => !k.use || k.use === 'sig');
+    checks.push({
+      name: 'signing_keys',
+      ok: signing.length > 0,
+      detail: signing.length ? `${signing.length} key(s)` : 'the provider published no signing keys',
+    });
+  } catch (e) {
+    // Deliberately generic. `jwks_uri` comes from the CALLER'S OWN discovery document, so echoing
+    // the upstream status here turned this endpoint into a readable internal port scanner.
+    checks.push({ name: 'signing_keys', ok: false, detail: 'could not read the provider keys' });
+  }
+
+  // What the admin must have registered at the provider — the single most common thing to get
+  // wrong, and something we can state exactly rather than ask them to guess.
+  const origin = (process.env.APP_URL || '').trim().replace(/\/+$/, '') || `${req.protocol}://${req.get('host')}`;
+  res.json({
+    ok: checks.every((c) => c.ok),
+    checks,
+    redirect_uri: `${origin}/api/auth/oidc/${row.slug}/callback`,
+    // Said plainly so a passing test is not mistaken for a working login.
+    note: 'unverifiable_by_test',
+  });
 });
 
 router.delete('/:orgId/sso/:id', requireOrgAdmin, (req, res) => {
   const existing = db.prepare('SELECT * FROM org_sso_providers WHERE id = ? AND organization_id = ?').get(req.params.id, req.orgId);
   if (!existing) return res.status(404).json({ error: 'Not found' });
   db.prepare('DELETE FROM org_sso_providers WHERE id = ?').run(existing.id);
-  logActivity(req.user.id, 'org_sso_deleted', `${existing.name} (${existing.slug})`, req.orgId, getClientIp(req));
+  logActivity(req.user.id, 'org_sso_deleted', `${existing.name} (${existing.slug}) org=${req.orgId}`, null, getClientIp(req));
   res.json({ success: true });
 });
 

@@ -345,11 +345,17 @@ is filled in for you and their slugs are `google` and `microsoft`:
 |----------|-------------|
 | `GOOGLE_CLIENT_ID` | OAuth 2.0 client ID from [Google Cloud Console](https://console.cloud.google.com) |
 | `MICROSOFT_CLIENT_ID` | Application (client) ID from the [Azure portal](https://portal.azure.com) |
-| `MICROSOFT_TENANT_ID` | Tenant ID, or `common` for multi-tenant (default `common`) |
+| `MICROSOFT_TENANT_ID` | **Your tenant GUID — required.** `common`/`organizations` are refused |
 
-⚠️ A tenant GUID narrows the accepted issuer to that tenant, so a token from any other tenant is
-rejected. `common` accepts any Microsoft account — which is the point of multi-tenant, but make it a
-decision rather than a default you inherited.
+⚠️ **Multi-tenant Microsoft (`common`) is deliberately refused, and Microsoft sign-in stays disabled
+until you set a tenant GUID.** Two reasons that point the same way. It cannot work: Microsoft's
+multi-tenant metadata advertises the literal template `https://login.microsoftonline.com/{tenantid}/v2.0`,
+so the issuer never matches and every login fails anyway. And the obvious fix is dangerous — accepting
+that template means accepting tokens from *every* Azure tenant, which is
+[nOAuth](https://www.descope.com/blog/post/noauth): any tenant admin can set an arbitrary, unverified
+`email` on one of their own users and be issued a session as that address. Safe multi-tenant support
+needs per-tenant pinning (validate `tid` against an allowlist, key accounts on `oid`+`tid` rather than
+email) and is not implemented.
 
 **Any other provider** is added by slug:
 
@@ -397,6 +403,22 @@ https://yourdomain.com/api/auth/oidc/<generated-slug>/callback
 
 The slug is generated rather than chosen so two customers cannot collide on — or guess — each
 other's. A domain may be claimed by only one organization; a second claim is refused.
+
+⚠️ **A provider may only authenticate emails inside the domains it registered.** An organization
+supplies its own issuer and client ID, so it controls that identity provider completely and could
+otherwise assert any address at all — including another company's, or an administrator's. Confining
+assertions to registered domains is what makes customer-configurable SSO safe to offer.
+
+⚠️ **Public email providers cannot be claimed.** `gmail.com`, `outlook.com`, `yahoo.com`, `icloud.com`
+and the rest of the consumer mailboxes are refused (`server/lib/public-email-domains.js`). Claiming
+one would offer every Gmail user a "sign in with your organization" button pointing at one tenant's
+infrastructure — phishing launched from this product's own login page — and would let one account
+deny a public domain to everyone else.
+
+⚠️ **Domain ownership is not yet verified.** A claimed domain currently means "no other organization
+had claimed it", not "this organization owns it". The blocklist above removes the mass-abuse case,
+but proof of control — a DNS TXT record, or a challenge to `postmaster@` — is still the missing
+control, and until it exists a domain claim should be treated as a support-reviewable action.
 
 Signing in through an organization's provider makes the user a member of that organization
 (`org_member`). Existing members keep whatever role they already have — logging in never promotes or
