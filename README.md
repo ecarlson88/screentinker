@@ -318,31 +318,61 @@ advertising it — put the account on the hidden plan and it simply gets those l
 above deliberately lists hidden plans too (marked as such), because the previous behaviour was that
 a hidden plan was invisible to the operator as well as the customer.
 
-#### Google OAuth
+#### Single sign-on (OpenID Connect)
 
-Let users sign in with Google.
+Any OIDC provider works — Google, Microsoft/Entra, Okta, Auth0, Keycloak, Authentik, Zitadel — through
+one flow: **Authorization Code with PKCE, run server-side**. The browser never talks to the provider
+directly, so there is no SDK to load and no third-party script origin to allow in the CSP.
 
-1. Create a project in [Google Cloud Console](https://console.cloud.google.com)
-2. Enable the Google Identity API
-3. Create OAuth 2.0 credentials (web application)
-4. Add `https://yourdomain.com` as an authorized origin
+Every login is verified as an **ID token**: signature against the provider's published JWKS,
+`iss` exactly as discovered, `aud` (and `azp`) matching your client, `exp`, and a `nonce` this server
+generated for that specific login. An access token is never accepted as proof of identity.
+
+Set the redirect URI at your provider to:
+
+```
+https://yourdomain.com/api/auth/oidc/<slug>/callback
+```
+
+Set `APP_URL` so that origin is pinned — the redirect URI must match your provider's registration
+exactly, and deriving it from the request `Host` would both break behind a second hostname and take
+its value from the caller.
+
+**Google** and **Microsoft** need only the variables this README has always documented; their issuer
+is filled in for you and their slugs are `google` and `microsoft`:
 
 | Variable | Description |
 |----------|-------------|
-| `GOOGLE_CLIENT_ID` | Your Google OAuth client ID |
+| `GOOGLE_CLIENT_ID` | OAuth 2.0 client ID from [Google Cloud Console](https://console.cloud.google.com) |
+| `MICROSOFT_CLIENT_ID` | Application (client) ID from the [Azure portal](https://portal.azure.com) |
+| `MICROSOFT_TENANT_ID` | Tenant ID, or `common` for multi-tenant (default `common`) |
 
-#### Microsoft OAuth
+⚠️ A tenant GUID narrows the accepted issuer to that tenant, so a token from any other tenant is
+rejected. `common` accepts any Microsoft account — which is the point of multi-tenant, but make it a
+decision rather than a default you inherited.
 
-Let users sign in with Microsoft/Azure AD.
+**Any other provider** is added by slug:
 
-1. Register an app in [Azure Portal](https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps)
-2. Add a web redirect URI: `https://yourdomain.com`
-3. Note the Application (client) ID
+```bash
+OIDC_PROVIDERS=okta,authentik
+OIDC_OKTA_ISSUER=https://example.okta.com
+OIDC_OKTA_CLIENT_ID=0oa...
+OIDC_OKTA_NAME=Okta                      # optional button label
+OIDC_OKTA_CLIENT_SECRET=...              # optional — PKCE means a public client works
+OIDC_OKTA_SCOPES=openid email profile    # optional
+```
 
-| Variable | Description |
-|----------|-------------|
-| `MICROSOFT_CLIENT_ID` | Your Azure AD application client ID |
-| `MICROSOFT_TENANT_ID` | Tenant ID (`common` for multi-tenant) |
+The issuer is the base URL whose `/.well-known/openid-configuration` describes the provider; endpoints
+and keys are discovered from it and cached.
+
+**Account rules.** A provider must assert a verified email, because the whole account model keys on
+it. An SSO login never takes over an existing account that has a password — the owner signs in
+locally and links from Settings. An account with no password is re-pointed at whichever provider
+authenticated it. If the provider's stable subject (`sub`) changes for an address, the login is
+refused rather than handing over an account to a recycled mailbox.
+
+⚠️ **TOTP is not prompted on an SSO login.** Second-factor is the identity provider's job in this
+flow, matching the long-standing behaviour of the SSO and API-token paths.
 
 #### Email (Microsoft Graph or SMTP)
 

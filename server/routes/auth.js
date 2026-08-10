@@ -3,7 +3,6 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const https = require('https');
 const { v4: uuidv4 } = require('uuid');
-const { OAuth2Client } = require('google-auth-library');
 const { db } = require('../db/database');
 const { generateToken, generateMfaPendingToken, verifyMfaPendingToken, requireAuth, requireAdmin, requireSuperAdmin, isPlatformRole, isPlatformStaff, PLATFORM_ROLES } = require('../middleware/auth');
 const { resolveTenancy } = require('../lib/tenancy');
@@ -18,6 +17,10 @@ const emailVerify = require('../lib/emailVerify');
 const emailSvc = require('../services/email');
 const { deleteUserCascade, OrgHasOtherMembersError } = require('../lib/user-deletion');
 const config = require('../config');
+const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
+const oidc = require('../lib/oidc');
+const oidcProviders = require('../lib/oidc-providers');
 
 // Phase 2.1: find or create the user's default org+workspace. Returns the
 // workspace_id to embed in the JWT. Idempotent: if the user already has
@@ -456,160 +459,24 @@ router.post('/totp/verify', (req, res) => {
 
 // ==================== Google OAuth ====================
 
-router.post('/google', async (req, res) => {
-  const { credential } = req.body;
-  if (!credential) return res.status(400).json({ error: 'Google credential required' });
+/*
+ * REMOVED 2026-08-10: POST /api/auth/google and POST /api/auth/microsoft.
+ *
+ * Both authenticated with an ACCESS token and neither checked who it was issued for. Google's path
+ * fell back to `tokeninfo?access_token=` and read the email out of the reply; Microsoft's handed the
+ * bearer token to Graph /me and trusted that. Graph — and tokeninfo — will describe the user behind
+ * a token minted for SOMEBODY ELSE'S application, so any site a user signed into that requested
+ * `email` or `User.Read` could replay their token here and be handed a session as them.
+ *
+ * Nothing is lost by deleting them: the login page called `google.accounts.oauth2` and
+ * `new msal.PublicClientApplication`, and neither SDK was ever loaded by any page in this app, so
+ * both buttons threw ReferenceError on click. The feature had never worked.
+ *
+ * Replaced by the OIDC routes at the bottom of this file, which verify an ID token's signature,
+ * issuer, audience and our own nonce, and which cover Google, Microsoft and any other provider
+ * through one code path. See lib/oidc.js.
+ */
 
-  try {
-    // Verify the Google ID token
-    const payload = await verifyGoogleToken(credential);
-    if (!payload) return res.status(401).json({ error: 'Invalid Google token' });
-
-    const { email, name, picture, sub: googleId } = payload;
-
-    // Find or create user
-    let user = db.prepare('SELECT * FROM users WHERE email = ?').get(email.toLowerCase());
-    const isNewUser = !user;
-
-    if (!user) {
-      if (!canRegister()) {
-        return res.status(403).json({ error: 'Public registration is disabled. Contact your administrator.' });
-      }
-      const id = uuidv4();
-      const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
-      const role = userCount === 0 ? 'platform_admin' : 'user';
-      const isFirst = userCount === 0;
-      const plan = (isFirst && config.selfHosted) ? 'enterprise' : 'pro';
-      const trialStarted = isFirst && config.selfHosted ? null : Math.floor(Date.now() / 1000);
-
-      db.prepare(`
-        INSERT INTO users (id, email, name, auth_provider, provider_id, avatar_url, role, plan_id, trial_started, trial_plan, email_verified)
-        VALUES (?, ?, ?, 'google', ?, ?, ?, ?, ?, ?, 1)
-      `).run(id, email.toLowerCase(), name || '', googleId, picture || '', role, plan, trialStarted, trialStarted ? 'pro' : null);
-
-      user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
-    } else if (user.auth_provider !== 'google') {
-      // Existing account with different provider — do NOT silently overwrite auth_provider.
-      // If they have a local password, require them to log in locally and link from settings.
-      if (user.password_hash) {
-        return res.status(409).json({ error: 'An account with this email already exists. Please log in with your password.' });
-      }
-      // No password (e.g. Microsoft → Google switch) — allow linking
-      db.prepare('UPDATE users SET auth_provider = ?, provider_id = ?, avatar_url = ? WHERE id = ?')
-        .run('google', googleId, picture || user.avatar_url, user.id);
-      user = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
-    }
-
-    const workspaceId = ensureDefaultOrgForUser(user, { allowCreate: config.autoCreateOrgOnSignup });
-    const token = generateToken(user, workspaceId);
-    const { password_hash, ...safeUser } = user;
-    res.json({ token, user: safeUser, current_workspace_id: workspaceId });
-
-    // Welcome + admin-notify only when this Google login created a new account.
-    if (isNewUser) sendSignupEmails(user, req);
-  } catch (err) {
-    console.error('Google auth error:', err);
-    res.status(401).json({ error: 'Google authentication failed' });
-  }
-});
-
-async function verifyGoogleToken(credential) {
-  const client = new OAuth2Client(config.googleClientId);
-  try {
-    const ticket = await client.verifyIdToken({
-      idToken: credential,
-      audience: config.googleClientId || undefined,
-    });
-    return ticket.getPayload();
-  } catch (e) {
-    // Fallback: if credential is an access token, verify via tokeninfo
-    try {
-      const res = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${credential}`);
-      if (!res.ok) throw new Error('Invalid token');
-      return await res.json();
-    } catch {
-      throw new Error('Google token verification failed: ' + e.message);
-    }
-  }
-}
-
-// ==================== Microsoft OAuth ====================
-
-router.post('/microsoft', async (req, res) => {
-  const { access_token } = req.body;
-  if (!access_token) return res.status(400).json({ error: 'Microsoft access token required' });
-
-  try {
-    // Use the access token to get user profile from Microsoft Graph
-    const profile = await getMicrosoftProfile(access_token);
-    if (!profile || !profile.mail && !profile.userPrincipalName) {
-      return res.status(401).json({ error: 'Could not get Microsoft profile' });
-    }
-
-    const email = (profile.mail || profile.userPrincipalName).toLowerCase();
-    const name = profile.displayName || '';
-    const microsoftId = profile.id;
-
-    // Find or create user
-    let user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-    const isNewUser = !user;
-
-    if (!user) {
-      if (!canRegister()) {
-        return res.status(403).json({ error: 'Public registration is disabled. Contact your administrator.' });
-      }
-      const id = uuidv4();
-      const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
-      const role = userCount === 0 ? 'platform_admin' : 'user';
-      const isFirst = userCount === 0;
-      const plan = (isFirst && config.selfHosted) ? 'enterprise' : 'pro';
-      const trialStarted = isFirst && config.selfHosted ? null : Math.floor(Date.now() / 1000);
-
-      db.prepare(`
-        INSERT INTO users (id, email, name, auth_provider, provider_id, role, plan_id, trial_started, trial_plan, email_verified)
-        VALUES (?, ?, ?, 'microsoft', ?, ?, ?, ?, ?, 1)
-      `).run(id, email, name, microsoftId, role, plan, trialStarted, trialStarted ? 'pro' : null);
-
-      user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
-    } else if (user.auth_provider !== 'microsoft') {
-      // Existing account with different provider — do NOT silently overwrite auth_provider.
-      if (user.password_hash) {
-        return res.status(409).json({ error: 'An account with this email already exists. Please log in with your password.' });
-      }
-      db.prepare('UPDATE users SET auth_provider = ?, provider_id = ? WHERE id = ?')
-        .run('microsoft', microsoftId, user.id);
-      user = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
-    }
-
-    const workspaceId = ensureDefaultOrgForUser(user, { allowCreate: config.autoCreateOrgOnSignup });
-    const token = generateToken(user, workspaceId);
-    const { password_hash, ...safeUser } = user;
-    res.json({ token, user: safeUser, current_workspace_id: workspaceId });
-
-    // Welcome + admin-notify only when this Microsoft login created a new account.
-    if (isNewUser) sendSignupEmails(user, req);
-  } catch (err) {
-    console.error('Microsoft auth error:', err);
-    res.status(401).json({ error: 'Microsoft authentication failed' });
-  }
-});
-
-function getMicrosoftProfile(accessToken) {
-  return new Promise((resolve, reject) => {
-    const options = {
-      hostname: 'graph.microsoft.com',
-      path: '/v1.0/me',
-      headers: { Authorization: `Bearer ${accessToken}` }
-    };
-    https.get(options, (resp) => {
-      let data = '';
-      resp.on('data', chunk => data += chunk);
-      resp.on('end', () => {
-        try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
-      });
-    }).on('error', reject);
-  });
-}
 
 // ==================== User Management ====================
 
@@ -876,12 +743,19 @@ router.put('/users/:id/password', requireAuth, requireAdmin, (req, res) => {
 // Get auth config (public - tells frontend which providers are available)
 router.get('/config', (req, res) => {
   const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
+  /*
+   * `providers` is the whole SSO surface now: slug + display name, nothing else. The browser no
+   * longer needs a client id, because it never talks to a provider itself — it follows a link to
+   * /api/auth/oidc/<slug>/start and the server builds the authorization request. That is what
+   * removed the need for a provider SDK on this page, and with it the CSP exception one would need.
+   */
+  const providers = oidcProviders.publicList();
   res.json({
-    googleEnabled: !!config.googleClientId,
-    googleClientId: config.googleClientId,
-    microsoftEnabled: !!config.microsoftClientId,
-    microsoftClientId: config.microsoftClientId,
-    microsoftTenantId: config.microsoftTenantId,
+    providers,
+    // Kept so a cached older login page hides its buttons rather than drawing dead ones. The client
+    // ids are deliberately no longer echoed — nothing in the browser has any use for them.
+    googleEnabled: providers.some((p) => p.slug === 'google'),
+    microsoftEnabled: providers.some((p) => p.slug === 'microsoft'),
     localEnabled: true,
     needsSetup: userCount === 0,
     registration_enabled: !config.disableRegistration || userCount === 0,
@@ -947,5 +821,230 @@ router.post('/accept-invite/:inviteId', requireAuth, (req, res) => {
     already_member: !!existing,
   });
 });
+
+
+// ==================== OpenID Connect (generic SSO) ====================
+/*
+ * ONE flow for every provider — Google, Microsoft, Okta, Keycloak, Authentik, anything that speaks
+ * OIDC. Authorization Code + PKCE, run server-side, which is why there is no provider SDK on the
+ * login page and no third-party script origin in the CSP.
+ *
+ * It replaces two endpoints that could not tell WHO a token was minted for. Detail in lib/oidc.js;
+ * the short version is that identity now comes from an ID token whose signature, issuer, audience
+ * and OUR nonce are all checked, instead of from an access token handed to a userinfo endpoint.
+ *
+ * ⚠️ TOTP: an SSO login does not prompt for it, matching the existing documented behaviour at the
+ * password-login branch above ("The SSO routes and the API-token path never reach here"). The
+ * second factor is the identity provider's job in this flow. Changing that is a product decision,
+ * not something this refactor should do silently.
+ */
+
+// The transaction is held in a short-lived signed cookie rather than server memory so that a
+// restart mid-login, or a second server process, does not strand the user on a dead state.
+const OIDC_TX_COOKIE = 'st_oidc_tx';
+const OIDC_TX_TTL_S = 600;
+
+function readCookie(req, name) {
+  const raw = req.headers.cookie;
+  if (!raw) return null;
+  for (const part of raw.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq === -1) continue;
+    if (part.slice(0, eq).trim() === name) return decodeURIComponent(part.slice(eq + 1).trim());
+  }
+  return null;
+}
+
+/*
+ * The origin the provider will redirect back to. APP_URL pins it, exactly as the signup and invite
+ * mails do, because the redirect_uri must match what is registered with the provider CHARACTER FOR
+ * CHARACTER — deriving it from the request Host would break the moment someone reaches the box by
+ * a second name, and would be attacker-controlled input in the bargain.
+ */
+function publicOrigin(req) {
+  const configured = (process.env.APP_URL || '').trim().replace(/\/+$/, '');
+  if (configured) return configured;
+  return `${req.protocol}://${req.get('host')}`;
+}
+
+const redirectUriFor = (req, slug) => `${publicOrigin(req)}/api/auth/oidc/${slug}/callback`;
+
+// Send the browser back to the SPA. Errors travel as a code the login page can translate; the
+// token travels in the FRAGMENT, which browsers do not send to servers and proxies do not log.
+function backToApp(res, params) {
+  const qs = new URLSearchParams(params).toString();
+  res.redirect(`/app#/login?${qs}`);
+}
+
+// Which providers this instance offers. Public: it is what draws the login buttons.
+router.get('/providers', (req, res) => {
+  res.json({ providers: oidcProviders.publicList() });
+});
+
+router.get('/oidc/:slug/start', async (req, res) => {
+  const provider = oidcProviders.get(req.params.slug);
+  if (!provider) return backToApp(res, { sso_error: 'unknown_provider' });
+
+  try {
+    const doc = await oidc.discover(provider.issuer);
+    const pkce = oidc.createPkce();
+    const nonce = oidc.randomToken();
+    const state = oidc.randomToken();
+
+    const tx = jwt.sign(
+      { slug: provider.slug, nonce, verifier: pkce.verifier, state },
+      config.jwtSecret,
+      { expiresIn: OIDC_TX_TTL_S },
+    );
+    res.cookie(OIDC_TX_COOKIE, tx, {
+      httpOnly: true,
+      sameSite: 'lax',            // the provider returns via a top-level GET, which Lax allows
+      secure: req.protocol === 'https',
+      maxAge: OIDC_TX_TTL_S * 1000,
+      path: '/api/auth',
+    });
+
+    const url = new URL(doc.authorization_endpoint);
+    url.searchParams.set('response_type', 'code');
+    url.searchParams.set('client_id', provider.clientId);
+    url.searchParams.set('redirect_uri', redirectUriFor(req, provider.slug));
+    url.searchParams.set('scope', provider.scopes);
+    url.searchParams.set('state', state);
+    url.searchParams.set('nonce', nonce);
+    url.searchParams.set('code_challenge', pkce.challenge);
+    url.searchParams.set('code_challenge_method', pkce.method);
+    res.redirect(url.toString());
+  } catch (err) {
+    console.error(`[oidc] ${req.params.slug} start failed:`, err.message);
+    backToApp(res, { sso_error: 'provider_unavailable' });
+  }
+});
+
+router.get('/oidc/:slug/callback', async (req, res) => {
+  const provider = oidcProviders.get(req.params.slug);
+  if (!provider) return backToApp(res, { sso_error: 'unknown_provider' });
+
+  // The provider itself can refuse (consent declined, admin policy). That is not an error here.
+  if (req.query.error) {
+    console.warn(`[oidc] ${provider.slug} returned ${req.query.error}`);
+    return backToApp(res, { sso_error: 'provider_refused' });
+  }
+
+  const raw = readCookie(req, OIDC_TX_COOKIE);
+  res.clearCookie(OIDC_TX_COOKIE, { path: '/api/auth' });
+  if (!raw) return backToApp(res, { sso_error: 'expired' });
+
+  let tx;
+  try {
+    tx = jwt.verify(raw, config.jwtSecret);
+  } catch {
+    return backToApp(res, { sso_error: 'expired' });
+  }
+
+  // CSRF: the state we minted, in the cookie only we could set, must match the one coming back.
+  // Compared in constant time so a wrong state cannot be discovered a character at a time.
+  const got = String(req.query.state || '');
+  const want = String(tx.state || '');
+  const sameLength = got.length === want.length;
+  if (!sameLength || !crypto.timingSafeEqual(Buffer.from(got), Buffer.from(want))) {
+    return backToApp(res, { sso_error: 'bad_state' });
+  }
+  if (tx.slug !== provider.slug) return backToApp(res, { sso_error: 'bad_state' });
+  if (!req.query.code) return backToApp(res, { sso_error: 'no_code' });
+
+  let claims;
+  try {
+    const tokens = await oidc.exchangeCode({
+      issuer: provider.issuer,
+      clientId: provider.clientId,
+      clientSecret: provider.clientSecret,
+      code: String(req.query.code),
+      redirectUri: redirectUriFor(req, provider.slug),
+      verifier: tx.verifier,
+    });
+    claims = await oidc.verifyIdToken(tokens.id_token, {
+      issuer: provider.issuer,
+      clientId: provider.clientId,
+      nonce: tx.nonce,
+    });
+  } catch (err) {
+    console.error(`[oidc] ${provider.slug} verification failed:`, err.message);
+    return backToApp(res, { sso_error: 'verification_failed' });
+  }
+
+  const email = String(claims.email || '').toLowerCase().trim();
+  if (!email) return backToApp(res, { sso_error: 'no_email' });
+  /*
+   * An unverified email is refused. The whole account model keys on email — linking, invites,
+   * password reset — so accepting an address the provider itself will not vouch for would let
+   * anyone who can type an address into a sloppy IdP arrive as its owner. Providers that omit the
+   * claim entirely are treated as "not asserted", which is the same answer.
+   */
+  if (claims.email_verified === false) return backToApp(res, { sso_error: 'email_unverified' });
+
+  try {
+    const result = upsertFederatedUser({ claims, email, provider, req });
+    if (result.error) return backToApp(res, { sso_error: result.error });
+    const { user, isNew } = result;
+
+    logSuccessfulLogin(user.id, user.email, getClientIp(req));
+    const workspaceId = ensureDefaultOrgForUser(user, { allowCreate: config.autoCreateOrgOnSignup });
+    const token = generateToken(user, workspaceId);
+    if (isNew) sendSignupEmails(user, req);
+    backToApp(res, { sso_token: token });
+  } catch (err) {
+    console.error(`[oidc] ${provider.slug} sign-in failed:`, err.message);
+    backToApp(res, { sso_error: 'server_error' });
+  }
+});
+
+/*
+ * Find or create the account behind a verified set of claims.
+ *
+ * The linking rule is the one the Google path already used, kept deliberately: an existing account
+ * WITH a password is never taken over by an SSO login — the owner proves control by logging in
+ * locally and linking from Settings. An account with no password (already federated) is re-pointed
+ * at whichever provider just authenticated it.
+ */
+function upsertFederatedUser({ claims, email, provider, req }) {
+  const existing = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+
+  if (!existing) {
+    if (!canRegister()) return { error: 'registration_disabled' };
+    const id = uuidv4();
+    const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
+    const isFirst = userCount === 0;
+    const role = isFirst ? 'platform_admin' : 'user';
+    const plan = (isFirst && config.selfHosted) ? 'enterprise' : 'pro';
+    const trialStarted = isFirst && config.selfHosted ? null : Math.floor(Date.now() / 1000);
+    db.prepare(`
+      INSERT INTO users (id, email, name, auth_provider, provider_id, avatar_url, role, plan_id, trial_started, trial_plan, email_verified)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+    `).run(id, email, claims.name || '', provider.slug, String(claims.sub), claims.picture || '',
+      role, plan, trialStarted, trialStarted ? 'pro' : null);
+    return { user: db.prepare('SELECT * FROM users WHERE id = ?').get(id), isNew: true };
+  }
+
+  if (existing.auth_provider !== provider.slug) {
+    if (existing.password_hash) return { error: 'account_exists_local' };
+    db.prepare('UPDATE users SET auth_provider = ?, provider_id = ?, avatar_url = ? WHERE id = ?')
+      .run(provider.slug, String(claims.sub), claims.picture || existing.avatar_url, existing.id);
+    return { user: db.prepare('SELECT * FROM users WHERE id = ?').get(existing.id), isNew: false };
+  }
+
+  /*
+   * Same provider, but a DIFFERENT subject. `sub` is the provider's stable id and the email is not:
+   * addresses get reassigned, especially inside companies. Refusing here is what stops a recycled
+   * address inheriting the previous holder's account.
+   */
+  if (existing.provider_id && String(existing.provider_id) !== String(claims.sub)) {
+    return { error: 'subject_mismatch' };
+  }
+  if (!existing.provider_id) {
+    db.prepare('UPDATE users SET provider_id = ? WHERE id = ?').run(String(claims.sub), existing.id);
+  }
+  return { user: db.prepare('SELECT * FROM users WHERE id = ?').get(existing.id), isNew: false };
+}
+
 
 module.exports = router;
