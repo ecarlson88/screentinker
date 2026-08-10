@@ -573,6 +573,10 @@ app.use('/api/auth/register', rateLimit(60000, 5)); // 5 registrations per minut
 app.use('/api/auth/totp/verify', rateLimit(60000, 10));
 // Email-verification resend: cap so it can't be used to spray mail at an address.
 app.use('/api/auth/resend-verification', rateLimit(60000, 5));
+// Domain lookup is unauthenticated by necessity (it runs before login). Rate limited so it
+// cannot be walked to enumerate which customers use SSO.
+app.use('/api/auth/sso/discover', rateLimit(60000, 10));
+app.use('/api/auth/sso/start', rateLimit(60000, 10));
 // Self-service password reset. The request endpoint is the spray surface (it sends mail to
 // an address the caller supplies), so it gets the tighter cap; the redeem endpoint is a
 // 32-byte-token guess, capped mostly to keep the bcrypt work bounded.
@@ -583,6 +587,9 @@ app.use('/api/auth/reset-password', rateLimit(60000, 10));
 // path prefix first, so this fires before /api/auth catches the request.
 app.use('/api/auth/users', rateLimit(60000, 20));
 app.use('/api/auth', require('./routes/auth'));
+// Per-organization SSO configuration. Mounted under /api/organizations so the org id is the
+// route's own subject, which is what the org_owner/org_admin check keys on.
+app.use('/api/organizations', require('./routes/org-sso'));
 // Rate limit pairing to prevent brute force (5 attempts per minute per IP).
 // #88: bind this to the whole /api/provision surface, not just /pair - the bare
 // POST /api/provision (routes/provisioning.js) is a second pairing endpoint that

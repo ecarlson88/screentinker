@@ -396,6 +396,40 @@ const migrations = [
   // Per-telemetry-row rather than on `devices` because a display can be swapped, unplugged or
   // renegotiated without the player re-registering, and because a dual-output player registers ONE
   // ROW PER OUTPUT (see output_index) — each row must carry its own screen, not the box's first.
+  /*
+   * Per-organization SSO.
+   *
+   * Instance-wide providers come from the environment and belong to whoever runs the server. These
+   * belong to a CUSTOMER: an organization brings its own identity provider, and its people sign in
+   * with it without the operator touching a config file.
+   *
+   * `slug` is globally unique and randomly generated rather than chosen, because it is a URL path
+   * segment (/api/auth/oidc/<slug>/start) and two organizations both wanting "okta" must not be
+   * able to collide — or to guess each other's. The admin only ever sees `name`.
+   *
+   * `client_secret_enc` is AES-256-GCM via lib/secretbox, the same at-rest treatment as TOTP
+   * secrets and BYOK AI keys. PKCE means a secret is optional, so a public client stores NULL.
+   *
+   * `email_domains` drives routing: a user typing name@customer.com is sent to that customer's
+   * provider instead of being shown a password box. It is a plain comma list because it is small,
+   * edited as a unit, and never joined against.
+   */
+  `CREATE TABLE IF NOT EXISTS org_sso_providers (
+    id                 TEXT PRIMARY KEY,
+    organization_id    TEXT NOT NULL,
+    slug               TEXT NOT NULL UNIQUE,
+    name               TEXT NOT NULL,
+    issuer             TEXT NOT NULL,
+    client_id          TEXT NOT NULL,
+    client_secret_enc  TEXT,
+    scopes             TEXT NOT NULL DEFAULT 'openid email profile',
+    email_domains      TEXT NOT NULL DEFAULT '',
+    enabled            INTEGER NOT NULL DEFAULT 1,
+    created_at         INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    updated_at         INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
+  )`,
+  "CREATE INDEX IF NOT EXISTS idx_org_sso_org ON org_sso_providers(organization_id)",
   "ALTER TABLE device_telemetry ADD COLUMN attached_display TEXT",
   "ALTER TABLE device_telemetry ADD COLUMN video_mode TEXT",
   // Panel temperature in Celsius. REAL because the sensor reports fractions, and nullable because

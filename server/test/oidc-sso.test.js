@@ -260,3 +260,105 @@ test('the browser is told slugs and names only — never a client id or secret',
   assert.ok(!serialised.includes('shh'));
   assert.deepEqual(Object.keys(pub[0]).sort(), ['name', 'slug']);
 });
+
+// ---------------------------------------------------------------------------------------------
+// Per-organization SSO.
+//
+// Instance providers belong to whoever runs the server; these belong to a CUSTOMER. Two properties
+// matter more than the feature itself: one organization must not be able to capture another's
+// logins, and the login page must not become a way to enumerate who the customers are.
+
+const Database = require('better-sqlite3');
+
+function orgDb() {
+  const d = new Database(':memory:');
+  d.exec(`
+    CREATE TABLE org_sso_providers (
+      id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, slug TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL, issuer TEXT NOT NULL, client_id TEXT NOT NULL, client_secret_enc TEXT,
+      scopes TEXT NOT NULL DEFAULT 'openid email profile', email_domains TEXT NOT NULL DEFAULT '',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0);
+  `);
+  return d;
+}
+
+function withOrgDb(rows, fn) {
+  const d = orgDb();
+  for (const r of rows) {
+    d.prepare(`INSERT INTO org_sso_providers (id, organization_id, slug, name, issuer, client_id, email_domains, enabled)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(r.id, r.org, r.slug, r.name, r.issuer || ISSUER, r.clientId || 'cid', r.domains || '', r.enabled === undefined ? 1 : r.enabled);
+  }
+  // Swap the module's lazily-resolved connection for this in-memory one.
+  const real = require('../db/database');
+  const saved = real.db;
+  real.db = d;
+  delete require.cache[require.resolve('../lib/oidc-providers')];
+  const mod = require('../lib/oidc-providers');
+  try { return fn(mod); } finally {
+    real.db = saved;
+    delete require.cache[require.resolve('../lib/oidc-providers')];
+  }
+}
+
+test('an org provider is found by the email DOMAIN', () => {
+  withOrgDb([{ id: '1', org: 'org-a', slug: 'orgaaa', name: 'Acme SSO', domains: 'acme.com,acme.co.uk' }], (m) => {
+    assert.equal(m.forEmail('someone@acme.com').name, 'Acme SSO');
+    assert.equal(m.forEmail('someone@ACME.CO.UK').name, 'Acme SSO', 'case-insensitive');
+    assert.equal(m.forEmail('someone@other.com'), null);
+    assert.equal(m.forEmail('not-an-email'), null);
+  });
+});
+
+test('a disabled provider stops answering for its domain', () => {
+  withOrgDb([{ id: '1', org: 'org-a', slug: 'orgaaa', name: 'Acme', domains: 'acme.com', enabled: 0 }], (m) => {
+    assert.equal(m.forEmail('x@acme.com'), null);
+    assert.equal(m.getOrgProvider('orgaaa'), null, 'and cannot be started directly either');
+  });
+});
+
+test('ORG PROVIDERS ARE NEVER PUBLISHED to the whole internet', () => {
+  // The login page lists instance-wide providers only. Listing a customer's IdP would both offer it
+  // to people it does not belong to and leak the customer list.
+  withOrgDb([{ id: '1', org: 'org-a', slug: 'orgaaa', name: 'Acme SSO', domains: 'acme.com' }], (m) => {
+    const pub = m.publicList({ GOOGLE_CLIENT_ID: 'g' });
+    assert.deepEqual(pub.map((p) => p.slug), ['google']);
+    assert.ok(!JSON.stringify(pub).includes('Acme'), 'no customer name anywhere in the public list');
+  });
+});
+
+test('an org provider is still resolvable by slug, so the shared login flow can run it', () => {
+  withOrgDb([{ id: '1', org: 'org-a', slug: 'orgaaa', name: 'Acme SSO', domains: 'acme.com' }], (m) => {
+    const p = m.get('orgaaa', {});
+    assert.equal(p.name, 'Acme SSO');
+    assert.equal(p.organizationId, 'org-a', 'carries its org so the callback can grant membership');
+    assert.equal(p.source, 'org');
+  });
+});
+
+test('an instance provider wins a slug clash with an org one', () => {
+  withOrgDb([{ id: '1', org: 'org-a', slug: 'google', name: 'Impostor', domains: 'evil.com' }], (m) => {
+    // Org slugs are randomly generated so this cannot happen by accident — but if it ever did, a
+    // tenant must not be able to shadow the platform's own Google button.
+    assert.equal(m.get('google', { GOOGLE_CLIENT_ID: 'real' }).name, 'Google');
+  });
+});
+
+test('the first organization to claim a domain keeps it', () => {
+  // Two rows, same domain. forEmail must be deterministic rather than returning whichever the
+  // database happened to hand back first — the API refuses the second claim, and this is the
+  // backstop if a row ever gets in another way.
+  withOrgDb([
+    { id: '1', org: 'org-a', slug: 'orgaaa', name: 'First', domains: 'shared.com' },
+    { id: '2', org: 'org-b', slug: 'orgbbb', name: 'Second', domains: 'shared.com' },
+  ], (m) => {
+    assert.equal(m.forEmail('x@shared.com').name, 'First');
+  });
+});
+
+test('no database means no org providers, and no crash', () => {
+  // The env-only paths must keep working on an instance where the table has not been migrated yet.
+  const m = require('../lib/oidc-providers');
+  assert.doesNotThrow(() => m.publicList({ GOOGLE_CLIENT_ID: 'g' }));
+});

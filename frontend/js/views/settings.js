@@ -66,6 +66,35 @@ export async function render(container) {
       </div>
     </div>
 
+    <!-- Per-organization SSO. Hidden unless the signed-in user administers an organization: this
+         is the most security-relevant setting a tenant has, so it is not shown to members who
+         cannot change it. Instance-wide providers are the operator's business and are configured
+         by environment, not here. -->
+    <div class="settings-section" id="ssoCard" style="display:none">
+      <h3>${t('sso.title')}</h3>
+      <p style="color:var(--text-muted);font-size:12px;margin-bottom:8px">${t('sso.blurb')}</p>
+      <div id="ssoList"></div>
+      <details id="ssoAddDetails" style="margin-top:12px">
+        <summary style="cursor:pointer;font-size:13px">${t('sso.add')}</summary>
+        <div style="margin-top:12px;display:grid;gap:10px;max-width:560px">
+          <div class="form-group"><label>${t('sso.f_name')}</label>
+            <input type="text" id="ssoName" class="input" placeholder="Acme SSO"></div>
+          <div class="form-group"><label>${t('sso.f_issuer')}</label>
+            <input type="url" id="ssoIssuer" class="input" placeholder="https://login.example.com">
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px">${t('sso.f_issuer_hint')}</div></div>
+          <div class="form-group"><label>${t('sso.f_client_id')}</label>
+            <input type="text" id="ssoClientId" class="input"></div>
+          <div class="form-group"><label>${t('sso.f_client_secret')}</label>
+            <input type="password" id="ssoClientSecret" class="input" autocomplete="new-password">
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px">${t('sso.f_client_secret_hint')}</div></div>
+          <div class="form-group"><label>${t('sso.f_domains')}</label>
+            <input type="text" id="ssoDomains" class="input" placeholder="acme.com, acme.co.uk">
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px">${t('sso.f_domains_hint')}</div></div>
+          <div><button class="btn btn-primary btn-sm" id="ssoCreateBtn">${t('sso.create')}</button></div>
+        </div>
+      </details>
+    </div>
+
     <div class="settings-section">
       <h3>${t('apitoken.title')}</h3>
       <p style="color:var(--text-muted);font-size:12px;margin-bottom:8px">${t('apitoken.desc')}</p>
@@ -633,6 +662,119 @@ export async function render(container) {
       if (fsel && folders.length) fsel.insertAdjacentHTML('beforeend', folders.map(f => `<option value="${esc(String(f.id))}">${esc(f.name)}</option>`).join(''));
     }
   });
+
+  /* ── Per-organization SSO ──────────────────────────────────────────────────────────────────
+   *
+   * Only an org owner/admin sees this. The server enforces the same rule (and answers 404, not
+   * 403, so an outsider learns nothing) — this just avoids showing a card the user cannot use.
+   */
+  const orgId = user.current_organization?.id;
+  const canManageSso = orgId && ['org_owner', 'org_admin'].includes(user.current_org_role);
+
+  async function loadSso() {
+    const card = document.getElementById('ssoCard');
+    if (!card || !canManageSso) return;
+    card.style.display = '';
+    const listEl = document.getElementById('ssoList');
+    let providers = [];
+    try {
+      const res = await fetch(`/api/organizations/${orgId}/sso`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+      });
+      if (!res.ok) throw new Error('load failed');
+      providers = (await res.json()).providers || [];
+    } catch {
+      listEl.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${esc(t('sso.load_failed'))}</p>`;
+      return;
+    }
+
+    if (!providers.length) {
+      listEl.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${esc(t('sso.none'))}</p>`;
+      return;
+    }
+
+    const origin = `${window.location.protocol}//${window.location.host}`;
+    listEl.innerHTML = providers.map((p) => `
+      <div style="border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <div>
+            <strong>${esc(p.name)}</strong>
+            ${p.enabled ? '' : `<span style="font-size:11px;color:var(--text-muted)"> — ${esc(t('sso.disabled'))}</span>`}
+            <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${esc(p.issuer)}</div>
+            <div style="font-size:12px;color:var(--text-muted)">${esc(t('sso.domains_label'))}: ${esc(p.email_domains || '—')}</div>
+          </div>
+          <div style="display:flex;gap:6px;flex-shrink:0">
+            <button class="btn btn-secondary btn-sm" data-sso-toggle="${esc(p.id)}" data-enabled="${p.enabled ? '1' : '0'}">
+              ${esc(p.enabled ? t('sso.disable') : t('sso.enable'))}
+            </button>
+            <button class="btn btn-danger btn-sm" data-sso-delete="${esc(p.id)}">${esc(t('sso.delete'))}</button>
+          </div>
+        </div>
+        <!-- The admin has to paste this into their identity provider, and it must match character
+             for character, so it is shown rather than described. -->
+        <div style="margin-top:8px;font-size:12px">
+          <div style="color:var(--text-muted)">${esc(t('sso.callback_label'))}</div>
+          <code style="display:block;word-break:break-all;padding:6px;background:var(--bg-secondary);border-radius:4px">${esc(origin + p.callback_url)}</code>
+        </div>
+      </div>`).join('');
+
+    listEl.querySelectorAll('[data-sso-toggle]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        await ssoRequest('PUT', `/${btn.dataset.ssoToggle}`, { enabled: btn.dataset.enabled !== '1' });
+      });
+    });
+    listEl.querySelectorAll('[data-sso-delete]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        if (!confirm(t('sso.confirm_delete'))) return;
+        await ssoRequest('DELETE', `/${btn.dataset.ssoDelete}`);
+      });
+    });
+  }
+
+  async function ssoRequest(method, path = '', body) {
+    try {
+      const res = await fetch(`/api/organizations/${orgId}/sso${path}`, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('token')}`,
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const data = await res.json().catch(() => ({}));
+      // The server's message is the useful one here — a bad issuer or a domain already claimed by
+      // another organization both say exactly what went wrong, and a generic failure would not.
+      if (!res.ok) { showToast(data.error || t('sso.save_failed'), 'error'); return false; }
+      showToast(t('sso.saved'), 'success');
+      await loadSso();
+      return true;
+    } catch {
+      showToast(t('sso.save_failed'), 'error');
+      return false;
+    }
+  }
+
+  document.getElementById('ssoCreateBtn')?.addEventListener('click', async () => {
+    const payload = {
+      name: document.getElementById('ssoName').value.trim(),
+      issuer: document.getElementById('ssoIssuer').value.trim(),
+      client_id: document.getElementById('ssoClientId').value.trim(),
+      client_secret: document.getElementById('ssoClientSecret').value,
+      email_domains: document.getElementById('ssoDomains').value.trim(),
+    };
+    if (!payload.name || !payload.issuer || !payload.client_id) {
+      showToast(t('sso.missing_fields'), 'error');
+      return;
+    }
+    if (await ssoRequest('POST', '', payload)) {
+      ['ssoName', 'ssoIssuer', 'ssoClientId', 'ssoClientSecret', 'ssoDomains']
+        .forEach((id) => { document.getElementById(id).value = ''; });
+      document.getElementById('ssoAddDetails').open = false;
+    }
+  });
+
+  loadSso();
+
 
   document.getElementById('createTokenBtn')?.addEventListener('click', async () => {
     const name = document.getElementById('tokName').value.trim();

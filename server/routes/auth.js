@@ -1,7 +1,6 @@
 const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
-const https = require('https');
 const { v4: uuidv4 } = require('uuid');
 const { db } = require('../db/database');
 const { generateToken, generateMfaPendingToken, verifyMfaPendingToken, requireAuth, requireAdmin, requireSuperAdmin, isPlatformRole, isPlatformStaff, PLATFORM_ROLES } = require('../middleware/auth');
@@ -881,6 +880,41 @@ router.get('/providers', (req, res) => {
   res.json({ providers: oidcProviders.publicList() });
 });
 
+/*
+ * Does this email address belong to an organization with its own identity provider?
+ *
+ * ⚠️ Answers with a BOOLEAN and nothing else. It deliberately does not return the provider's slug
+ * or its display name, because both identify a CUSTOMER: a lookup that answered
+ * "yes — Acme Corp SSO" would turn a guessed domain into confirmation that Acme buys this product,
+ * and the slug would hand out a working entry point to their tenant's login.
+ *
+ * "example.com uses SSO" is the smallest answer that still lets the page draw the right button, and
+ * it is something anyone could infer by watching an employee log in. The domain-to-provider mapping
+ * stays server-side: POST /sso/start does the lookup again and redirects, so the browser never
+ * learns which provider it is being sent to until the provider itself says so.
+ *
+ * It also never reveals whether the ACCOUNT exists — only the domain is matched — so this cannot be
+ * walked to enumerate users.
+ */
+router.get('/sso/discover', (req, res) => {
+  res.json({ sso: !!oidcProviders.forEmail(req.query.email) });
+});
+
+/*
+ * Begin an organization SSO login for an email address.
+ *
+ * POST, so the address travels in a body rather than in a URL that lands in browser history, proxy
+ * logs and any Referer sent by the provider's page. The lookup happens here rather than in the
+ * browser for the reason above: the slug is never published.
+ */
+router.post('/sso/start', express.urlencoded({ extended: false }), (req, res) => {
+  const provider = oidcProviders.forEmail((req.body && req.body.email) || req.query.email);
+  // An unknown domain is answered exactly like a known one that is disabled: back to the login page
+  // with nothing learned.
+  if (!provider) return res.redirect('/app#/login?sso_error=unknown_provider');
+  res.redirect(`/api/auth/oidc/${encodeURIComponent(provider.slug)}/start`);
+});
+
 router.get('/oidc/:slug/start', async (req, res) => {
   const provider = oidcProviders.get(req.params.slug);
   if (!provider) return backToApp(res, { sso_error: 'unknown_provider' });
@@ -986,6 +1020,27 @@ router.get('/oidc/:slug/callback', async (req, res) => {
     const result = upsertFederatedUser({ claims, email, provider, req });
     if (result.error) return backToApp(res, { sso_error: result.error });
     const { user, isNew } = result;
+
+    /*
+     * A provider that belongs to an ORGANIZATION vouches for its own people, so anyone who signs in
+     * through it becomes a member of that organization — otherwise a customer would configure SSO,
+     * their staff would authenticate successfully, and each would land in a fresh empty org of their
+     * own, which is the opposite of what they asked for.
+     *
+     * Membership is added, never changed: an existing member keeps whatever role they already have,
+     * so an org_owner cannot be demoted by logging in, and a plain member cannot be promoted by one.
+     * Instance-wide providers do none of this — they say nothing about which tenant anyone is in.
+     */
+    if (provider.organizationId) {
+      const already = db.prepare(
+        'SELECT 1 FROM organization_members WHERE organization_id = ? AND user_id = ?'
+      ).get(provider.organizationId, user.id);
+      if (!already) {
+        db.prepare("INSERT INTO organization_members (organization_id, user_id, role) VALUES (?, ?, 'org_member')")
+          .run(provider.organizationId, user.id);
+        logActivity(user.id, 'org_sso_joined', `via ${provider.name}`, provider.organizationId, getClientIp(req));
+      }
+    }
 
     logSuccessfulLogin(user.id, user.email, getClientIp(req));
     const workspaceId = ensureDefaultOrgForUser(user, { allowCreate: config.autoCreateOrgOnSignup });

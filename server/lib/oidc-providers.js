@@ -104,7 +104,11 @@ function list(env = process.env) {
 /** One provider by slug, or null. This is the seam per-org SSO will extend. */
 function get(slug, env = process.env) {
   if (!slug || !SLUG_RE.test(String(slug))) return null;
-  return list(env).find((p) => p.slug === slug) || null;
+  const fromEnvList = list(env).find((p) => p.slug === slug);
+  if (fromEnvList) return fromEnvList;
+  // Instance providers win a name clash, which cannot happen in practice (org slugs are random)
+  // but decides it deterministically if it ever did.
+  return getOrgProvider(slug);
 }
 
 /**
@@ -116,4 +120,73 @@ function publicList(env = process.env) {
   return list(env).map((p) => ({ slug: p.slug, name: p.name }));
 }
 
-module.exports = { list, get, publicList, DEFAULT_SCOPES, SLUG_RE };
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────
+ * Per-organization providers.
+ *
+ * Loaded lazily so this module stays usable (and testable) without a database — the env-only paths
+ * above never touch it. An org provider is an ordinary provider once loaded: the login flow cannot
+ * tell the difference, which is the whole point of resolving everything through get().
+ */
+
+let _db = null;
+function db() {
+  if (_db === null) {
+    try { _db = require('../db/database').db; } catch { _db = false; }
+  }
+  return _db || null;
+}
+
+function rowToProvider(row, secretbox) {
+  return {
+    slug: row.slug,
+    name: row.name,
+    issuer: String(row.issuer).replace(/\/+$/, ''),
+    clientId: row.client_id,
+    clientSecret: row.client_secret_enc ? secretbox.decrypt(row.client_secret_enc) : null,
+    scopes: row.scopes || DEFAULT_SCOPES,
+    source: 'org',
+    organizationId: row.organization_id,
+  };
+}
+
+/** One org provider by its (globally unique) slug, or null. */
+function getOrgProvider(slug) {
+  const conn = db();
+  if (!conn || !slug || !SLUG_RE.test(String(slug))) return null;
+  try {
+    const row = conn.prepare('SELECT * FROM org_sso_providers WHERE slug = ? AND enabled = 1').get(String(slug));
+    if (!row) return null;
+    return rowToProvider(row, require('./secretbox'));
+  } catch { return null; }   // table not migrated yet
+}
+
+/**
+ * Which provider, if any, owns an email address.
+ *
+ * Domain routing is what makes per-org SSO usable: a customer's staff type their work address and
+ * are sent to their own identity provider rather than being asked for a password they do not have.
+ *
+ * ⚠️ Matched on the domain ONLY, never on whether the address exists. Answering "yes, that domain
+ * uses SSO" tells an attacker nothing they could not learn from the customer's website; answering
+ * "yes, that USER exists" would be an account-enumeration oracle on the login page.
+ */
+function forEmail(email) {
+  const conn = db();
+  if (!conn) return null;
+  const at = String(email || '').lastIndexOf('@');
+  if (at === -1) return null;
+  const domain = String(email).slice(at + 1).toLowerCase().trim();
+  if (!domain) return null;
+  try {
+    const rows = conn.prepare("SELECT * FROM org_sso_providers WHERE enabled = 1 AND email_domains != ''").all();
+    const secretbox = require('./secretbox');
+    for (const row of rows) {
+      const domains = String(row.email_domains || '').split(',').map((d) => d.trim().toLowerCase()).filter(Boolean);
+      if (domains.includes(domain)) return rowToProvider(row, secretbox);
+    }
+  } catch { /* table not migrated yet */ }
+  return null;
+}
+
+module.exports = { list, get, publicList, getOrgProvider, forEmail, DEFAULT_SCOPES, SLUG_RE };

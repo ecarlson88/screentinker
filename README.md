@@ -374,6 +374,35 @@ refused rather than handing over an account to a recycled mailbox.
 ⚠️ **TOTP is not prompted on an SSO login.** Second-factor is the identity provider's job in this
 flow, matching the long-standing behaviour of the SSO and API-token paths.
 
+#### Per-organization SSO (customer-configured)
+
+The providers above are **instance-wide** — they belong to whoever runs the server and appear as
+buttons on the login page for everyone.
+
+An organization can also bring **its own** identity provider, configured by an org owner or admin in
+**Settings → Single sign-on**. No environment variable or restart is involved.
+
+A per-org provider is **never listed publicly**. It appears only when someone types an email address
+at one of that organization's domains, at which point the login page offers a generic
+"Continue with single sign-on" button. The domain lookup answers with a boolean and nothing else —
+no provider name, no slug — so a guessed domain cannot confirm who a customer is, and the mapping
+back to a provider happens server-side on submit. Both endpoints are rate limited.
+
+Each provider gets a randomly generated redirect URI, shown in Settings, which the admin registers
+with their identity provider:
+
+```
+https://yourdomain.com/api/auth/oidc/<generated-slug>/callback
+```
+
+The slug is generated rather than chosen so two customers cannot collide on — or guess — each
+other's. A domain may be claimed by only one organization; a second claim is refused.
+
+Signing in through an organization's provider makes the user a member of that organization
+(`org_member`). Existing members keep whatever role they already have — logging in never promotes or
+demotes anyone. Client secrets are optional (PKCE), and are stored AES-256-GCM encrypted and never
+returned by the API.
+
 #### Email (Microsoft Graph or SMTP)
 
 Email powers offline alerts, welcome/signup mail, admin notifications, and password reset. Two interchangeable transports are supported, selected by `EMAIL_TRANSPORT`:

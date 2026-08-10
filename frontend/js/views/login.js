@@ -105,6 +105,11 @@ export async function render(container) {
             </div>
             <div class="form-group">
               <label>${t('auth.password')}</label>
+            <!-- Filled in only when the typed email belongs to an organization that has configured
+                 its own identity provider. A customer's IdP is never listed to everyone: the button
+                 appears for the people it belongs to and nobody else, which also keeps the customer
+                 list off the login page. -->
+            <div id="orgSsoSlot" style="display:none;margin-bottom:12px"></div>
               <input type="password" id="loginPassword" class="input" placeholder="${t('auth.placeholder_password')}" autocomplete="current-password">
             </div>
             ${isSetup ? `
@@ -478,6 +483,64 @@ function setupHandlers(config, isSetup) {
    * log — and it is stripped from the address bar before anything else happens, so a shared screen
    * or a copied URL does not carry a live session.
    */
+  /*
+   * Email-first SSO for organizations.
+   *
+   * Instance-wide providers are always on the page. An ORG provider is different — it belongs to
+   * one customer — so it is fetched by domain once the address looks complete, and only then.
+   *
+   * Debounced because this fires while someone types, and the endpoint is rate limited; asking on
+   * every keystroke would spend a user's whole budget before they finished their own address.
+   */
+  let ssoLookupTimer = null;
+  let lastDomainAsked = '';
+  const orgSlot = () => document.getElementById('orgSsoSlot');
+
+  async function lookupOrgSso(email) {
+    const at = String(email || '').lastIndexOf('@');
+    const domain = at === -1 ? '' : email.slice(at + 1).trim().toLowerCase();
+    const slot = orgSlot();
+    if (!slot) return;
+    // Nothing to ask about until there is a domain with a dot in it.
+    if (!domain || !domain.includes('.')) { slot.style.display = 'none'; slot.innerHTML = ''; lastDomainAsked = ''; return; }
+    if (domain === lastDomainAsked) return;
+    lastDomainAsked = domain;
+    try {
+      const res = await fetch(`/api/auth/sso/discover?email=${encodeURIComponent(email)}`);
+      const data = await res.json();
+      if (!data.sso) { slot.style.display = 'none'; slot.innerHTML = ''; return; }
+      /*
+       * A FORM, not a link, and a deliberately generic label.
+       *
+       * The lookup tells us only that this domain uses SSO — never which provider or whose it is,
+       * because that would identify a customer to anyone who guessed a domain. The server does the
+       * mapping again on submit, so the slug is never published to the page. POST keeps the address
+       * out of the URL, browser history and any Referer the provider's page would send.
+       */
+      slot.innerHTML = `
+        <form method="POST" action="/api/auth/sso/start">
+          <input type="hidden" name="email" value="${esc(email)}">
+          <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;padding:10px">
+            ${t('auth.signin_sso')}
+          </button>
+        </form>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:6px;text-align:center">
+          ${t('auth.sso_org_hint')}
+        </div>`;
+      slot.style.display = '';
+    } catch {
+      // A failed lookup must never block a password login — the form still works.
+      slot.style.display = 'none';
+      slot.innerHTML = '';
+    }
+  }
+
+  document.getElementById('loginEmail')?.addEventListener('input', (e) => {
+    clearTimeout(ssoLookupTimer);
+    const value = e.target.value;
+    ssoLookupTimer = setTimeout(() => lookupOrgSso(value), 400);
+  });
+
   const ssoParams = new URLSearchParams((window.location.hash.split('?')[1] || ''));
   const ssoToken = ssoParams.get('sso_token');
   const ssoError = ssoParams.get('sso_error');
