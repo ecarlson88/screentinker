@@ -712,7 +712,7 @@ export async function render(container) {
             ${p.enabled ? '' : `<span style="font-size:11px;color:var(--text-muted)"> — ${esc(t('sso.disabled'))}</span>`}
             <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${esc(p.issuer)}</div>
             <div style="font-size:12px;color:var(--text-muted)">${esc(t('sso.domains_label'))}: ${esc(p.email_domains || '—')}</div>
-            ${((p.domains || []).some((d) => !d.verified) || ((p.domains || []).length === 0 && p.email_domains))
+            ${((p.domains || []).some((d) => !d.verified) || (p.domains || []).length === 0)
               ? `<div style="font-size:12px;color:var(--warning,#b45309);margin-top:2px">⚠️ ${esc(t('sso.unverified_warning'))}</div>`
               : ''}
           </div>
@@ -843,7 +843,20 @@ export async function render(container) {
         // Confirmed, because it removes the only way in for everyone at these domains, and the way
         // back needs the operator rather than this button.
         if (!window.confirm(t('sso.only_confirm'))) return;
-        if (await post(`/api/organizations/${orgId}/sso-only`)) { showToast(t('sso.only_on'), 'success'); await loadSso(); }
+        const r = await post(`/api/organizations/${orgId}/sso-only`);
+        if (r) {
+          showToast(t('sso.only_on'), 'success');
+          /*
+           * Name the people who just lost their only way in. The server reports them precisely so
+           * the admin finds out HERE rather than from a support ticket — and it was being thrown
+           * away, which made the whole warning pointless.
+           */
+          const stranded = r.stranded_members || [];
+          if (stranded.length) {
+            window.alert(t('sso.only_stranded', { list: stranded.join('\n') }));
+          }
+          await loadSso();
+        }
       });
 
       const reqBtn = box.querySelector('#ssoOnlyRequest');
@@ -1000,7 +1013,8 @@ export async function render(container) {
       // The server's message is the useful one here — a bad issuer or a domain already claimed by
       // another organization both say exactly what went wrong, and a generic failure would not.
       if (!res.ok) { showToast(data.error || t('sso.save_failed'), 'error'); return false; }
-      showToast(t('sso.saved'), 'success');
+      // "Saved" for a DELETE read as though nothing had been destroyed.
+      showToast(t(method === 'DELETE' ? 'sso.removed' : 'sso.saved'), 'success');
       await loadSso();
       return true;
     } catch {
@@ -1227,25 +1241,30 @@ async function loadUsers() {
         </thead>
         <tbody>
           ${users.map(u => `
-            <tr style="border-bottom:1px solid var(--border)" data-user-id="${u.id}">
+            <!-- ESCAPED. A SECOND copy of the platform users table lives here, rendered from the
+                 same endpoint as the one in views/admin.js. Escaping only that one left this whole
+                 table wide open, including a raw text node for the email - and an org or workspace
+                 admin can choose an email, so this executed in the platform admin's session. When
+                 you touch one of these tables, touch both. -->
+            <tr style="border-bottom:1px solid var(--border)" data-user-id="${esc(u.id)}">
               <td style="padding:10px 12px">
-                <div style="font-weight:500">${u.name || u.email}</div>
-                <div style="font-size:11px;color:var(--text-muted)">${u.email}</div>
+                <div style="font-weight:500">${esc(u.name || u.email)}</div>
+                <div style="font-size:11px;color:var(--text-muted)">${esc(u.email)}</div>
               </td>
               <td style="padding:10px 12px">
-                <span style="background:var(--bg-primary);padding:2px 8px;border-radius:10px;font-size:11px">${u.auth_provider}</span>
+                <span style="background:var(--bg-primary);padding:2px 8px;border-radius:10px;font-size:11px">${esc(u.auth_provider)}</span>
               </td>
               <td style="padding:10px 12px">
-                <span style="color:${isPlatformAdmin(u) ? 'var(--accent)' : 'var(--text-secondary)'}">${u.role}</span>
+                <span style="color:${isPlatformAdmin(u) ? 'var(--accent)' : 'var(--text-secondary)'}">${esc(u.role)}</span>
               </td>
               <td style="padding:10px 12px">
-                <select class="input plan-select" data-user-id="${u.id}" style="padding:4px 8px;font-size:12px;width:auto">
-                  ${plans.map(p => `<option value="${p.id}" ${u.plan_id === p.id ? 'selected' : ''}>${p.display_name}</option>`).join('')}
+                <select class="input plan-select" data-user-id="${esc(u.id)}" style="padding:4px 8px;font-size:12px;width:auto">
+                  ${plans.map(p => `<option value="${esc(p.id)}" ${u.plan_id === p.id ? 'selected' : ''}>${esc(p.display_name)}</option>`).join('')}
                 </select>
               </td>
               <td style="padding:10px 12px;white-space:nowrap">
-                ${u.auth_provider === 'local' && u.id !== currentUser.id ? `<button class="btn btn-secondary btn-sm reset-user-pw-btn" data-user-id="${u.id}" data-user-email="${u.email}" style="margin-right:4px">${t('settings.user.reset_password')}</button>` : ''}
-                ${u.id !== currentUser.id ? `<button class="btn btn-danger btn-sm delete-user-btn" data-user-id="${u.id}">${t('settings.user.remove')}</button>` : `<span style="color:var(--text-muted);font-size:11px">${t('settings.user.you')}</span>`}
+                ${u.auth_provider === 'local' && u.id !== currentUser.id ? `<button class="btn btn-secondary btn-sm reset-user-pw-btn" data-user-id="${esc(u.id)}" data-user-email="${esc(u.email)}" style="margin-right:4px">${t('settings.user.reset_password')}</button>` : ''}
+                ${u.id !== currentUser.id ? `<button class="btn btn-danger btn-sm delete-user-btn" data-user-id="${esc(u.id)}">${t('settings.user.remove')}</button>` : `<span style="color:var(--text-muted);font-size:11px">${t('settings.user.you')}</span>`}
               </td>
             </tr>
           `).join('')}

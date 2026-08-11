@@ -262,8 +262,8 @@ function notifyOperatorOfClaim(req, { domains, orgId, providerName }) {
       '8 hours if it is not proved. No action is needed unless this looks wrong.',
     ].join('\n');
     const subject = domains.length === 1
-      ? `[ScreenTinker] SSO domain claimed: ${domains[0]}`
-      : `[ScreenTinker] ${domains.length} SSO domains claimed`;
+      ? `SSO domain claimed: ${domains[0]}`
+      : `${domains.length} SSO domains claimed`;   // services/email.js adds the [ScreenTinker] prefix
     for (const a of admins) {
       Promise.resolve(emailSvc.sendEmail({ to: a.email, subject, text: body }))
         .catch((e) => console.error('[org-sso] claim notification failed:', e && e.message));
@@ -307,7 +307,7 @@ function notifyOperatorOfRemovalRequest(req, { id, orgId, orgName, reason }) {
     for (const a of admins) {
       Promise.resolve(emailSvc.sendEmail({
         to: a.email,
-        subject: `[ScreenTinker] Approval needed: stop requiring SSO for ${orgName || orgId}`,
+        subject: `Approval needed: stop requiring SSO for ${orgName || orgId}`,
         text: body,
       })).catch((e) => console.error('[org-sso] removal notification failed:', e && e.message));
     }

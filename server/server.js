@@ -184,6 +184,29 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), strip
 // 12mb so AI-designed signs with embedded generated images (base64 data URLs)
 // can be published. #41 follow-up: upload generated images to the content store
 // and reference by URL instead of embedding, to keep widget configs small.
+/*
+ * Collapse duplicate slashes in the PATH before anything routes on it.
+ *
+ * Express normalises the mount boundary for a router, so `/api/auth//login` still reaches the login
+ * handler — but `app.use('/api/auth/login', rateLimit(...))` does NOT match it, so the limiter
+ * never runs. One extra slash therefore removed EVERY per-endpoint limit under /api/auth: unlimited
+ * password guesses (a review got a real session after 60 unthrottled attempts), unlimited TOTP
+ * codes, unlimited password-reset mail to any address, and the SSO discovery cap that exists to
+ * stop customer enumeration. It also made the per-account lockout a denial-of-service tool.
+ *
+ * Fixing it inside the limiter's key is not enough — the middleware is never invoked. The path has
+ * to be one canonical thing before routing, which is what this does. Query and body are untouched.
+ */
+app.use((req, res, next) => {
+  const q = req.url.indexOf('?');
+  const path = q === -1 ? req.url : req.url.slice(0, q);
+  if (path.includes('//')) {
+    const collapsed = path.replace(/\/{2,}/g, '/');
+    req.url = q === -1 ? collapsed : collapsed + req.url.slice(q);
+  }
+  next();
+});
+
 app.use(express.json({ limit: '12mb' }));
 const { sanitizeBody } = require('./middleware/sanitize');
 app.use(sanitizeBody);
@@ -551,7 +574,12 @@ const LIMIT_PATH_SHAPES = [
   [/^\/api\/organizations\/sso-only\/removal-requests\/[^/]+\/[^/]+$/, () => '/api/organizations/sso-only/removal-requests/:id/:decision'],
   [/^\/api\/organizations\/sso-only\/removal-requests$/, () => '/api/organizations/sso-only/removal-requests'],
   [/^\/api\/organizations\/[^/]+\/sso-only\/removal-request\/[^/]+$/, () => '/api/organizations/:id/sso-only/removal-request/:id'],
+  [/^\/api\/organizations\/[^/]+\/sso-only\/removal-request$/, () => '/api/organizations/:id/sso-only/removal-request'],
   [/^\/api\/organizations\/[^/]+\/sso-only$/, () => '/api/organizations/:id/sso-only'],
+  // The reset/target routes mint a bucket per TARGET without this, which is the same
+  // caller-chosen-segment defect, at the mount next door.
+  [/^\/api\/auth\/users\/[^/]+\/(.+)$/, (m) => `/api/auth/users/:id/${m[1]}`],
+  [/^\/api\/content\/[^/]+$/, () => '/api/content/:id'],
   [/^\/api\/organizations\/[^/]+\/sso\/[^/]+\/domains\/[^/]+\/verify$/, () => '/api/organizations/:id/sso/:id/domains/:domain/verify'],
   [/^\/api\/organizations\/[^/]+\/sso\/[^/]+\/test$/, () => '/api/organizations/:id/sso/:id/test'],
   [/^\/api\/organizations\/[^/]+\/sso\/[^/]+$/, () => '/api/organizations/:id/sso/:id'],

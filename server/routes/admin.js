@@ -21,7 +21,9 @@ const { platformDefaultRow, HARDCODED_BRANDING, PLATFORM_DEFAULT_ID } = require(
 //     have no user/role-management power (#13).
 
 // Same email shape the invite-create endpoint validates against (workspaces.js).
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Markup characters are not legal here. The looser form admitted < > " ' and an admin-
+// chosen email became stored XSS in the platform admin's user list.
+const EMAIL_RE = /^[^\s@<>"'`\\;,()\[\]]+@[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$/;
 const WORKSPACE_ROLES = ['workspace_admin', 'workspace_editor', 'workspace_viewer'];
 // Mirror the server-side minimum enforced by PUT /api/auth/me and register.
 const MIN_PASSWORD_LENGTH = 8;

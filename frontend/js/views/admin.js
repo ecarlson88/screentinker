@@ -183,7 +183,9 @@ async function loadSsoOnlyRequests() {
     section.style.display = 'none';
     return;
   }
-  if (!requests.length) { section.style.display = 'none'; return; }
+  // Clear as well as hide: leaving the last decided request in the tree kept its live
+  // Approve/Reject listeners attached to a request that no longer exists.
+  if (!requests.length) { host.innerHTML = ''; section.style.display = 'none'; return; }
   section.style.display = '';
 
   host.innerHTML = requests.map((r) => `
@@ -369,7 +371,7 @@ async function loadUsers() {
               </td>
               ${workspaceCell(u)}
               <td style="padding:8px;white-space:nowrap">
-                ${u.auth_provider === 'local' && u.id !== currentUser.id ? `<button class="btn btn-secondary btn-sm" data-reset-pw-user="${u.id}" data-user-email="${u.email}" style="margin-right:4px">${t('admin.reset_password')}</button>` : ''}
+                ${u.auth_provider === 'local' && u.id !== currentUser.id ? `<button class="btn btn-secondary btn-sm" data-reset-pw-user="${esc(u.id)}" data-user-email="${esc(u.email)}" style="margin-right:4px">${t('admin.reset_password')}</button>` : ''}
                 ${!isPlatformAdmin(u) ? `<button class="btn btn-danger btn-sm" data-delete-user="${u.id}">${t('admin.remove')}</button>` : `<span style="color:var(--text-muted);font-size:11px">${t('admin.owner')}</span>`}
               </td>
             </tr>

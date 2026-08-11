@@ -206,26 +206,48 @@ router.post('/login', (req, res) => {
    * anyone — so refusing on the domain alone reveals nothing new, and it reveals it identically
    * for addresses that exist and addresses that do not.
    */
+  /*
+   * SSO-only refusal, arranged so it is neither an account-existence oracle NOR a way to brick the
+   * instance.
+   *
+   * Two constraints pull against each other. Answering 403 only for addresses that EXIST turned
+   * this into an enumeration oracle. But hoisting the check above the account lookup — the obvious
+   * cure — silently killed the platform_admin break-glass, because role is not known until the row
+   * is read. That is worse than it sounds: on a self-hosted instance the operator IS the org owner,
+   * and the guard that stops an admin locking themselves out GUARANTEES their address is inside the
+   * enforced set. Approving a removal request needs a platform admin to be signed in, so the
+   * recovery loop closed on itself and the only way back was a shell.
+   *
+   * Both hold if the operator is let through on a CORRECT PASSWORD and nothing else: every wrong
+   * answer is the identical 403, whether the address exists, does not exist, or belongs to the
+   * operator. The only observable difference needs the password, which an enumerator does not have.
+   */
   const domainEnforced = (() => {
     try { return oidcProviders.ssoOnlyForEmail(email); } catch (e) {
       console.error('[login] SSO-only status unavailable, refusing password login:', e && e.message);
       return { unavailable: true };
     }
   })();
-  if (domainEnforced) {
+  const ssoRefusal = () => {
     logFailedLogin(email, getClientIp(req), 'Password login refused: domain requires SSO');
     return res.status(403).json({
       error: 'Your organization requires single sign-on. Use the single sign-on button to continue.',
       code: 'sso_required',
       sso_start: '/api/auth/sso/start',
     });
-  }
+  };
 
   const user = db.prepare('SELECT * FROM users WHERE email = ? AND auth_provider = ?').get(email.toLowerCase(), 'local');
   if (!user) {
+    // An unknown address at an enforced domain answers exactly like a known one — see above.
+    if (domainEnforced) return ssoRefusal();
     logFailedLogin(email, getClientIp(req), 'User not found');
     return res.status(401).json({ error: 'Invalid email or password' });
   }
+  // The break-glass: the operator may still sign in with a password at an enforced domain, but a
+  // WRONG password answers with the same refusal everyone else gets, so nothing is learned.
+  const breakGlass = domainEnforced && user.role === 'platform_admin' && !domainEnforced.unavailable;
+  if (domainEnforced && !breakGlass) return ssoRefusal();
 
   /*
    * SSO-ONLY. The organization that owns this VERIFIED domain requires its identity provider, so a
@@ -285,7 +307,13 @@ router.post('/login', (req, res) => {
     return res.status(401).json({ error: 'Invalid email or password' });
   }
 
-  if (!bcrypt.compareSync(password, user.password_hash)) {
+  if (!user.password_hash || !bcrypt.compareSync(password, user.password_hash)) {
+    if (breakGlass) {
+      // Same answer as every other address at this domain: the operator's existence is not a fact
+      // this endpoint gives away to someone who cannot type their password.
+      loginLockout.recordFailure(user.id);
+      return ssoRefusal();
+    }
     const rec = loginLockout.recordFailure(user.id);
     if (rec.lockedUntil) logActivity(null, 'auth:login_locked', `${email} - locked after repeated failures`, null, getClientIp(req));
     logFailedLogin(email, getClientIp(req), 'Wrong password');
@@ -1379,6 +1407,25 @@ router.get('/oidc/:slug/callback', asyncRoute(async (req, res) => {
       if (!already) {
         db.prepare("INSERT INTO organization_members (organization_id, user_id, role) VALUES (?, ?, 'org_member')")
           .run(provider.organizationId, user.id);
+        /*
+         * ⚠️ And a WORKSPACE, or they land somewhere else entirely.
+         *
+         * ensureDefaultOrgForUser (below) looks for a workspace_members row, not an
+         * organization_members one — so writing only the org membership left it finding nothing and
+         * minting the user a brand-new personal organization, which then became their CURRENT one.
+         * The customer's Members page still read "Members (1)": their staff signed in successfully
+         * and were invisible to the admin, managing a private org of their own. That is precisely
+         * the outcome the comment above says this code exists to prevent.
+         */
+        const target = db.prepare(
+          'SELECT id FROM workspaces WHERE organization_id = ? ORDER BY created_at LIMIT 1'
+        ).get(provider.organizationId);
+        if (target) {
+          db.prepare("INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'workspace_viewer')")
+            .run(target.id, user.id);
+        } else {
+          console.warn(`[oidc] org ${provider.organizationId} has no workspace; ${user.email} has no place to land`);
+        }
         // (userId, action, details, deviceId, ipAddress, workspaceId) — the org id is NOT the 4th
         // arg; it was landing in device_id, which has no FK to catch it.
         logActivity(user.id, 'org_sso_joined', `via ${provider.name} org=${provider.organizationId}`, null, getClientIp(req));
@@ -1505,7 +1552,33 @@ function upsertFederatedUser({ claims, email, provider, req }) {
   }
 
   if (existing.auth_provider !== provider.slug) {
-    if (existing.password_hash) return { error: 'account_exists_local' };
+    /*
+     * An account WITH a password is normally never taken over by an SSO login — the owner proves
+     * control by signing in locally. There is exactly one case where refusing is worse than
+     * adopting, and it is a trap the previous design walked into:
+     *
+     * an organization that REQUIRES single sign-on, asserting an address at a domain it has PROVED
+     * by DNS. There, the password is already refused by policy (403 sso_required), so refusing the
+     * SSO login too shuts both doors — the member cannot sign in by any route, password reset
+     * "succeeds" and changes nothing, and if that member is the last org admin the removal request
+     * that would undo it can never be filed. A review locked an admin out of their own tenant this
+     * way, with no route back short of SQL.
+     *
+     * Adopting is safe precisely because of what the two conditions already establish: the tenant
+     * proved control of the domain (a DNS record they published), and the confinement check above
+     * has already refused anything outside it. This is what every hosted identity product does with
+     * a verified domain, and it is the only reading under which "requires single sign-on" is a
+     * statement about the domain rather than about whoever happened to register first.
+     */
+    const ssoOnlyAdoption = !!provider.organizationId
+      && !!oidcProviders.ssoOnlyForEmail(email)
+      && emailAllowedForProvider(provider, email);
+    if (existing.password_hash && !ssoOnlyAdoption) return { error: 'account_exists_local' };
+    if (existing.password_hash && ssoOnlyAdoption) {
+      // The password is dead by policy; clear it rather than leave a credential nobody may use.
+      db.prepare('UPDATE users SET password_hash = NULL WHERE id = ?').run(existing.id);
+      console.log(`[oidc] ${provider.slug} adopted ${email} (organization requires SSO for its verified domain)`);
+    }
     /*
      * `password_hash IS NULL` was the wrong test for "safe to relink". Every SSO-created account has
      * a null password, so it meant "any federated account may be adopted by whichever provider spoke
