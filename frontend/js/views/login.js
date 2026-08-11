@@ -105,13 +105,19 @@ export async function render(container) {
               <input type="email" id="loginEmail" class="input" placeholder="${t('auth.placeholder_email')}" autocomplete="email">
             </div>
             <div class="form-group">
-              <label id="loginPasswordLabel">${t('auth.password')}</label>
+              <label id="loginPasswordLabel" for="loginPassword">${t('auth.password')}</label>
+              <input type="password" id="loginPassword" class="input" placeholder="${t('auth.placeholder_password')}" autocomplete="current-password">
             <!-- Filled in only when the typed email belongs to an organization that has configured
                  its own identity provider. A customer's IdP is never listed to everyone: the button
                  appears for the people it belongs to and nobody else, which also keeps the customer
-                 list off the login page. -->
-            <div id="orgSsoSlot" style="display:none;margin-bottom:12px"></div>
-              <input type="password" id="loginPassword" class="input" placeholder="${t('auth.placeholder_password')}" autocomplete="current-password">
+                 list off the login page.
+
+                 ⚠️ BELOW the input, inside the same group. Above it, the button sat between the
+                 "Password" label and its field — so the label described the SSO button and the
+                 password box had none at all. It has to stay INSIDE the group, because hiding the
+                 group is how the password is hidden and the button must survive that... which is
+                 exactly why setPasswordVisible() hides the FIELD, never the container. -->
+            <div id="orgSsoSlot" style="display:none;margin-top:12px"></div>
             </div>
             ${isSetup ? `
             <div class="form-group">
@@ -182,7 +188,7 @@ export async function render(container) {
 
           <div id="ssoBlock">
           ${(config.providers || []).length ? `
-          <div style="display:flex;align-items:center;gap:12px;margin:20px 0">
+          <div id="ssoDivider" style="display:flex;align-items:center;gap:12px;margin:20px 0">
             <hr style="flex:1;border-color:var(--border)">
             <span style="color:var(--text-muted);font-size:12px">${t('auth.divider_or')}</span>
             <hr style="flex:1;border-color:var(--border)">
@@ -533,6 +539,17 @@ function setupHandlers(config, isSetup) {
      */
     const instance = document.getElementById('instanceProviders');
     if (instance) instance.style.display = show;
+    /*
+     * "Create Account" goes too. Registration at an SSO-only domain is refused by the server, and
+     * leaving the button was worse than useless: it was the ONLY action left on the card, so the
+     * page invited the one thing that cannot work.
+     */
+    const reg = document.getElementById('showRegisterBtn');
+    if (reg) reg.style.display = show;
+    // The OR divider sits outside #instanceProviders, so hiding those alone left a dangling rule
+    // with nothing beneath it.
+    const divider = document.getElementById('ssoDivider');
+    if (divider) divider.style.display = show;
     // "Forgot your password?" sits in its own <p>; hide the wrapper so no empty gap is left.
     const forgot = document.getElementById('forgotLink');
     if (forgot) {

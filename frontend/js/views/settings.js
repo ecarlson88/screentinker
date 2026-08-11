@@ -706,7 +706,7 @@ export async function render(container) {
     const origin = `${window.location.protocol}//${window.location.host}`;
     listEl.innerHTML = providers.map((p) => `
       <div style="border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin-bottom:8px">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
           <div>
             <strong>${esc(p.name)}</strong>
             ${p.enabled ? '' : `<span style="font-size:11px;color:var(--text-muted)"> — ${esc(t('sso.disabled'))}</span>`}
@@ -716,7 +716,9 @@ export async function render(container) {
               ? `<div style="font-size:12px;color:var(--warning,#b45309);margin-top:2px">⚠️ ${esc(t('sso.unverified_warning'))}</div>`
               : ''}
           </div>
-          <div style="display:flex;gap:6px;flex-shrink:0">
+          <!-- wrap, do not shrink-to-clip: at 375px this row ran to x=417 on a 375px viewport and
+               the page does not scroll horizontally, so "Remove" was simply unreachable. -->
+          <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
             <button class="btn btn-secondary btn-sm" data-sso-test="${esc(p.id)}">${esc(t('sso.test'))}</button>
             <button class="btn btn-secondary btn-sm" data-sso-edit="${esc(p.id)}">${esc(t('sso.edit'))}</button>
             <button class="btn btn-secondary btn-sm" data-sso-toggle="${esc(p.id)}" data-enabled="${p.enabled ? '1' : '0'}">

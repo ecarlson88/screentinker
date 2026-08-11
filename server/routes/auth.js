@@ -104,6 +104,28 @@ router.post('/register', (req, res) => {
   if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
   if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
 
+  /*
+   * An organization that requires single sign-on must not have password accounts created at its
+   * domains — not even by a stranger. Two things went wrong without this: the account was issued a
+   * working session immediately (a bypass), and it then held the address forever, because
+   * upsertFederatedUser refuses to adopt a row that has a password. Registering ceo@acme.test
+   * before the real CEO's first login left that address dead in BOTH directions with no
+   * self-service way out.
+   */
+  let ssoOnlyOrg = null;
+  try {
+    ssoOnlyOrg = oidcProviders.ssoOnlyForEmail(email);
+  } catch (e) {
+    console.error('[register] SSO-only status unavailable, refusing registration:', e && e.message);
+    ssoOnlyOrg = { unavailable: true };
+  }
+  if (ssoOnlyOrg) {
+    return res.status(403).json({
+      error: 'That domain uses single sign-on. Sign in with your organization instead of creating a password.',
+      code: 'sso_required',
+    });
+  }
+
   const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email.toLowerCase());
   if (existing) return res.status(409).json({ error: 'Email already registered' });
 

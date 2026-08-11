@@ -555,6 +555,19 @@ function rateLimit(windowMs, maxRequests) {
       .replace(/\/+$/, '')              // ignore a trailing slash
       .toLowerCase()
       .replace(/^(\/api\/auth\/oidc)\/[^/]+/, '$1')   // the slug is not a distinct endpoint
+      /*
+       * ⚠️ /api/organizations/<orgId>/... carries THREE caller-chosen segments (org id, provider
+       * id, domain). Folding only the OIDC slug left this mount with a fresh bucket per request:
+       * a review measured 120 unauthenticated calls with unique org ids and got zero 429s, while
+       * the same path 120 times correctly produced 60. The limiter runs before requireAuth, so an
+       * anonymous caller could mint buckets for free — and this limit exists specifically to bound
+       * outbound OIDC discovery and live DNS lookups.
+       *
+       * Ids are collapsed to a placeholder so the SHAPE of the endpoint is the key.
+       */
+      .replace(/^(\/api\/organizations)\/[^/]+/, '$1/:id')
+      .replace(/^(\/api\/organizations\/:id\/sso)\/[^/]+/, '$1/:id')
+      .replace(/(\/domains)\/[^/]+/, '$1/:id')
       || '/';
     const key = getClientIp(req) + normalisedPath;
     const now = Date.now();
