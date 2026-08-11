@@ -533,6 +533,47 @@ app.use('/socket.io-client', express.static(
 // safe because the callback runs at request time, which is a subtle thing to depend on.
 const limiterTelemetry = require('./lib/limiter-telemetry');
 const rateLimits = new Map();
+/*
+ * The bucket key is the SHAPE of the endpoint, never the spelling the caller chose.
+ *
+ * Two failures drove this. Express routes non-strictly, so `/api/auth/login/` was a different key
+ * and bought a fresh ten password attempts. And `/api/organizations/<id>/...` carries three
+ * caller-chosen segments, so every request minted its own bucket — 120 calls with unique ids gave
+ * zero 429s against the limit that exists to bound outbound OIDC discovery and live DNS lookups.
+ *
+ * ⚠️ Fold by EXPLICIT shape, not with a clever catch-all. A single regex that collapsed "anything
+ * else" put every unknown path in one bucket WITH the real endpoints, so flooding nonsense URLs
+ * exhausted the limit for `/sso-only` — trading a bypass for a denial of service. Known shapes get
+ * their own keys; everything else shares one, separate from all of them.
+ */
+const LIMIT_PATH_SHAPES = [
+  [/^\/api\/auth\/oidc\/[^/]+\/(start|callback)$/, (m) => `/api/auth/oidc/:slug/${m[1]}`],
+  [/^\/api\/organizations\/sso-only\/removal-requests\/[^/]+\/[^/]+$/, () => '/api/organizations/sso-only/removal-requests/:id/:decision'],
+  [/^\/api\/organizations\/sso-only\/removal-requests$/, () => '/api/organizations/sso-only/removal-requests'],
+  [/^\/api\/organizations\/[^/]+\/sso-only\/removal-request\/[^/]+$/, () => '/api/organizations/:id/sso-only/removal-request/:id'],
+  [/^\/api\/organizations\/[^/]+\/sso-only$/, () => '/api/organizations/:id/sso-only'],
+  [/^\/api\/organizations\/[^/]+\/sso\/[^/]+\/domains\/[^/]+\/verify$/, () => '/api/organizations/:id/sso/:id/domains/:domain/verify'],
+  [/^\/api\/organizations\/[^/]+\/sso\/[^/]+\/test$/, () => '/api/organizations/:id/sso/:id/test'],
+  [/^\/api\/organizations\/[^/]+\/sso\/[^/]+$/, () => '/api/organizations/:id/sso/:id'],
+  [/^\/api\/organizations\/[^/]+\/sso$/, () => '/api/organizations/:id/sso'],
+];
+
+function canonicalLimitPath(rawPath) {
+  const p = rawPath
+    .replace(/\/{2,}/g, '/')      // collapse doubled separators
+    .replace(/\/+$/, '')          // a trailing slash is the same endpoint
+    .toLowerCase()
+    || '/';
+  for (const [re, to] of LIMIT_PATH_SHAPES) {
+    const m = p.match(re);
+    if (m) return to(m);
+  }
+  // Unrecognised, but still under a mount whose ids are caller-chosen: one shared bucket, kept
+  // apart from every real endpoint so flooding it cannot starve them.
+  if (p.startsWith('/api/organizations/')) return '/api/organizations/:unmatched';
+  return p;
+}
+
 function rateLimit(windowMs, maxRequests) {
   return (req, res, next) => {
     // #100: key on the FULL path, not req.path. These limiters are mounted via
@@ -550,34 +591,7 @@ function rateLimit(windowMs, maxRequests) {
      * slug is folded out too: one bucket per IP per ENDPOINT, not per spelling of it.
      */
     const rawPath = (req.originalUrl || req.url || req.path).split('?')[0];
-    const normalisedPath = rawPath
-      .replace(/\/{2,}/g, '/')          // collapse doubled separators
-      .replace(/\/+$/, '')              // ignore a trailing slash
-      .toLowerCase()
-      .replace(/^(\/api\/auth\/oidc)\/[^/]+/, '$1')   // the slug is not a distinct endpoint
-      /*
-       * ⚠️ /api/organizations/<orgId>/... carries THREE caller-chosen segments (org id, provider
-       * id, domain). Folding only the OIDC slug left this mount with a fresh bucket per request:
-       * a review measured 120 unauthenticated calls with unique org ids and got zero 429s, while
-       * the same path 120 times correctly produced 60. The limiter runs before requireAuth, so an
-       * anonymous caller could mint buckets for free — and this limit exists specifically to bound
-       * outbound OIDC discovery and live DNS lookups.
-       *
-       * Ids are collapsed to a placeholder so the SHAPE of the endpoint is the key.
-       */
-      /*
-       * Order matters: the most specific shapes first, because the generic org-id fold would
-       * otherwise eat `sso-only` as an organization id and leave the request id free — which is
-       * how two of these stayed unlimited after the first attempt.
-       */
-      .replace(/^\/api\/organizations\/sso-only\/removal-requests\/[^/]+\/[^/]+/, '/api/organizations/sso-only/removal-requests/:id/:decision')
-      .replace(/^\/api\/organizations\/sso-only\/removal-requests/, '/api/organizations/sso-only/removal-requests')
-      .replace(/^(\/api\/organizations)\/[^/]+/, '$1/:id')
-      .replace(/^(\/api\/organizations\/:id\/sso-only\/removal-request)\/[^/]+/, '$1/:id')
-      .replace(/^(\/api\/organizations\/:id\/sso)\/[^/]+/, '$1/:id')
-      // Anchored under the organizations mount so it cannot surprise a future limiter elsewhere.
-      .replace(/^(\/api\/organizations\/:id\/sso\/:id\/domains)\/[^/]+/, '$1/:id')
-      || '/';
+    const normalisedPath = canonicalLimitPath(rawPath);
     const key = getClientIp(req) + normalisedPath;
     const now = Date.now();
     const windowStart = now - windowMs;

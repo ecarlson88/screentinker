@@ -570,9 +570,20 @@ function setupHandlers(config, isSetup) {
     if (domain === lastDomainAsked) return;
     try {
       const res = await fetch(`/api/auth/sso/discover?email=${encodeURIComponent(email)}`);
+      /*
+       * ⚠️ Check the STATUS, not just that a body parsed.
+       *
+       * The comment below has always said a tripped rate limit must not poison the domain — and it
+       * did anyway, because a 429 body is perfectly valid JSON: res.json() resolved, `data.sso`
+       * came back undefined, so the single sign-on button was hidden, the password box restored,
+       * and `lastDomainAsked` recorded — permanently, for the life of the page. On an SSO-only
+       * domain that is the worst possible outcome: the password box the user is then offered gets
+       * 403, and the button they are told to use is not on the screen. Discover is 10/min per IP,
+       * so a handful of colleagues behind one office address is enough to trigger it.
+       */
+      if (!res.ok) throw new Error(`discover ${res.status}`);
       const data = await res.json();
-      // Remembered only after a SUCCESSFUL answer. Recording it before the fetch meant a 5xx or a
-      // tripped rate limit poisoned that domain for the rest of the page's life.
+      // Remembered only after a SUCCESSFUL answer.
       lastDomainAsked = domain;
       if (!data.sso) { slot.style.display = 'none'; slot.innerHTML = ''; setPasswordVisible(true); return; }
       /*

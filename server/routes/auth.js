@@ -188,6 +188,30 @@ router.post('/login', (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
 
+  /*
+   * The DOMAIN check runs BEFORE the account lookup, deliberately.
+   *
+   * Answering `403 sso_required` only for addresses that exist turned this endpoint into an
+   * account-existence oracle: a wrong password got 403 for a real address and 401 for an invented
+   * one. Whether a domain uses single sign-on is already public — /sso/discover answers it for
+   * anyone — so refusing on the domain alone reveals nothing new, and it reveals it identically
+   * for addresses that exist and addresses that do not.
+   */
+  const domainEnforced = (() => {
+    try { return oidcProviders.ssoOnlyForEmail(email); } catch (e) {
+      console.error('[login] SSO-only status unavailable, refusing password login:', e && e.message);
+      return { unavailable: true };
+    }
+  })();
+  if (domainEnforced) {
+    logFailedLogin(email, getClientIp(req), 'Password login refused: domain requires SSO');
+    return res.status(403).json({
+      error: 'Your organization requires single sign-on. Use the single sign-on button to continue.',
+      code: 'sso_required',
+      sso_start: '/api/auth/sso/start',
+    });
+  }
+
   const user = db.prepare('SELECT * FROM users WHERE email = ? AND auth_provider = ?').get(email.toLowerCase(), 'local');
   if (!user) {
     logFailedLogin(email, getClientIp(req), 'User not found');
@@ -226,12 +250,17 @@ router.post('/login', (req, res) => {
       enforced = { unavailable: true };
     }
     if (enforced) {
-      logFailedLogin(email, getClientIp(req), 'Password login refused: organization requires SSO');
-      return res.status(403).json({
-        error: 'Your organization requires single sign-on. Use the single sign-on button to continue.',
-        code: 'sso_required',
-        sso_start: '/api/auth/sso/start',
-      });
+      /*
+       * Reached only when the ADDRESS's domain is not enforced but the user is a MEMBER of an
+       * organization that requires single sign-on — an off-domain contractor, say. The generic 401
+       * is deliberate: a distinct answer here would put the existence oracle back, for exactly the
+       * accounts an attacker would most like to enumerate. These people cannot sign in by any
+       * route (their domain is not verified, so their org's provider will not assert for them
+       * either), which is why enabling SSO-only now names them to the admin up front instead of
+       * leaving them to discover it here.
+       */
+      logFailedLogin(email, getClientIp(req), 'Password login refused: member of an SSO-only organization');
+      return res.status(401).json({ error: 'Invalid email or password' });
     }
   }
 

@@ -92,7 +92,9 @@ function fail(reason, hint) {
 }
 
 function preflight() {
-  if (process.env.ST_SKIP_DEP_PREFLIGHT === '1') return;
+  // Same spellings as every other boolean the server accepts, so an operator who writes `true`
+  // does not silently get a boot that reaches for the registry anyway.
+  if (['1', 'true', 'yes'].includes(String(process.env.ST_SKIP_DEP_PREFLIGHT || '').toLowerCase())) return;
 
   const missing = missingDeps();
   const nodeModulesAbsent = !fs.existsSync(NODE_MODULES);
@@ -110,8 +112,17 @@ function preflight() {
        */
       const hasLock = fs.existsSync(path.join(SERVER_DIR, 'package-lock.json'));
       if (hasLock && nodeModulesAbsent) {
-        // Nothing installed, so `ci` has nothing to destroy and gives a reproducible tree.
-        run(['ci', '--omit=dev', '--no-audit', '--no-fund'], 'installing');
+        /*
+         * Nothing installed, so `ci` has nothing to destroy and gives a reproducible tree.
+         *
+         * `--omit=dev` ONLY when this is plainly a production boot. Applying it unconditionally
+         * meant a cold start on a developer machine installed 307 packages and left `npm test`
+         * broken — js-yaml, puppeteer-core and socket.io-client absent — which is the same class of
+         * surprise as the prune this file already warns about, arriving through the other branch of
+         * the same `if`.
+         */
+        const prod = process.env.NODE_ENV === 'production';
+        run(prod ? ['ci', '--omit=dev', '--no-audit', '--no-fund'] : ['ci', '--no-audit', '--no-fund'], 'installing');
       } else {
         /*
          * ⚠️ Install ONLY what is missing, by name, and never `--omit=dev` on a populated tree.
@@ -126,8 +137,18 @@ function preflight() {
         run(['install', '--no-save', '--no-audit', '--no-fund', ...missing], 'installing missing packages');
       }
     } catch (e) {
-      fail(`could not install dependencies: ${e && e.message}`,
-        'Run `npm ci --omit=dev` in the server directory, or check network access to the npm registry.');
+      /*
+       * An install can fail because ANOTHER server started at the same moment and won the race —
+       * observed as `ENOTEMPTY … rename node_modules/fs-extra`. The tree is complete by the time we
+       * see the error, so exiting here killed a process that had nothing wrong with it. Re-check
+       * before giving up; only a genuinely incomplete tree is fatal.
+       */
+      const afterFailure = missingDeps();
+      if (afterFailure.length) {
+        fail(`could not install dependencies: ${e && e.message}`,
+          'Run `npm ci --omit=dev` in the server directory, or check network access to the npm registry.');
+      }
+      console.warn(`[preflight] install reported an error but the tree is complete (${e && e.message}) — continuing.`);
     }
     const still = missingDeps();
     if (still.length) {
