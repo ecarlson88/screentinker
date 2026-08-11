@@ -329,24 +329,54 @@ function notifyOperatorOfRemovalRequest(req, { id, orgId, orgName, reason }) {
  * turn the provider off. So the same interlock guards every route that would leave the tenant with
  * nothing enforcing, and points at the request as the way through.
  */
-function assertNotLastEnforcingProvider(orgId, providerId, what) {
-  const org = db.prepare('SELECT sso_only FROM organizations WHERE id = ?').get(orgId);
-  if (!org || !org.sso_only) return;
-  const remaining = db.prepare(`
-    SELECT COUNT(*) AS n FROM org_sso_domains d
+/** The domains that currently ENFORCE for an organization: verified, on an enabled provider. */
+function enforcingDomains(orgId, excludeProviderId = null) {
+  return db.prepare(`
+    SELECT d.domain FROM org_sso_domains d
       JOIN org_sso_providers p ON p.id = d.provider_id
      WHERE d.organization_id = ? AND d.verified_at IS NOT NULL AND p.enabled = 1
-       AND p.id != ?
-  `).get(orgId, providerId).n;
-  if (remaining > 0) return;   // another provider still enforces; this one may go
-  const e = new Error(`Your organization requires single sign-on, so ${what} would leave nobody able to sign in. `
+       AND (? IS NULL OR p.id != ?)
+  `).all(orgId, excludeProviderId, excludeProviderId).map((r) => r.domain);
+}
+
+/*
+ * An SSO-only organization may not shrink the set of domains that enforce.
+ *
+ * The first version of this asked "would ANY provider still enforce?", which was the wrong
+ * question twice over, and a review defeated it both ways:
+ *
+ *   SWAP     it only fired when the resulting domain list was EMPTY, so replacing
+ *            `acme.test` with `decoy.test` removed every proof and sailed through — two PUTs
+ *            and the customer's domain no longer required anything.
+ *   SIBLING  it counted PROVIDERS, so with two configured you could disable the one that owns
+ *            your staff's domain while the other, covering a domain nobody signs in at, kept the
+ *            answer "yes, something still enforces".
+ *
+ * The question that matters is per-DOMAIN: after this change, is every domain that enforces today
+ * still enforcing? Losing one is exactly what needs the operator, whichever route gets you there.
+ */
+function assertEnforcementNotReduced(orgId, providerId, nextDomainsFor, what) {
+  const org = db.prepare('SELECT sso_only FROM organizations WHERE id = ?').get(orgId);
+  if (!org || !org.sso_only) return;
+
+  const before = new Set(enforcingDomains(orgId));
+  const after = new Set(enforcingDomains(orgId, providerId));
+  // Whatever this provider will still contribute afterwards, as VERIFIED domains only — a domain
+  // being re-added is unverified, so it does not count as still enforcing.
+  for (const d of nextDomainsFor) after.add(d);
+
+  const lost = [...before].filter((d) => !after.has(d));
+  if (!lost.length) return;
+
+  const e = new Error(`Your organization requires single sign-on, so ${what} would stop `
+    + `${lost.join(', ')} from being covered and leave those people unable to sign in. `
     + 'Ask the people who run this server to approve stopping the requirement first.');
   e.status = 409;
   e.code = 'sso_only_locked';
   throw e;
 }
 
-/** A provider's domains, with the DNS record each unverified one still needs. */
+/** A provider's domains, with the DNS record each unverified one still needs. *//** A provider's domains, with the DNS record each unverified one still needs. */
 function domainsFor(providerId) {
   return db.prepare('SELECT * FROM org_sso_domains WHERE provider_id = ? ORDER BY domain').all(providerId)
     .map((r) => ({
@@ -504,8 +534,21 @@ router.put('/:orgId/sso/:id', requireOrgAdmin, requireVerifiedAdmin, asyncRoute(
   // Disabling this provider, or removing the domains it enforces through, is the same act as
   // turning the requirement off — and that needs the operator.
   try {
-    if (enabled !== undefined && !enabled) assertNotLastEnforcingProvider(req.orgId, existing.id, 'disabling this provider');
-    if (domainsSupplied && !cleanDomains) assertNotLastEnforcingProvider(req.orgId, existing.id, 'removing every sign-in domain');
+    const willBeEnabled = enabled === undefined ? !!existing.enabled : !!enabled;
+    /*
+     * What this provider still covers afterwards: nothing if it is being disabled, otherwise the
+     * domains it keeps that are ALREADY verified. A domain typed back in arrives unverified and
+     * enforces nobody, which is precisely how the swap bypass worked.
+     */
+    let keeps = [];
+    if (willBeEnabled) {
+      const kept = domainsSupplied ? new Set(cleanDomains.split(',').filter(Boolean)) : null;
+      keeps = db.prepare("SELECT domain FROM org_sso_domains WHERE provider_id = ? AND verified_at IS NOT NULL")
+        .all(existing.id).map((r) => r.domain)
+        .filter((d) => (kept ? kept.has(d) : true));
+    }
+    const what = !willBeEnabled ? 'disabling this provider' : 'changing its sign-in domains';
+    assertEnforcementNotReduced(req.orgId, existing.id, keeps, what);
   } catch (e) {
     return res.status(e.status || 400).json({ error: e.message, code: e.code });
   }
@@ -719,10 +762,56 @@ router.post('/:orgId/sso-only', requireOrgAdmin, requireVerifiedAdmin, (req, res
       code: 'no_verified_domain',
     });
   }
+
+  /*
+   * ⚠️ Do not let the person pressing this button lock themselves out.
+   *
+   * The commonest onboarding shape is: sign up with a personal or consultancy address, create the
+   * organization, verify the company domain, turn this on. Enforcement then covers them (they are
+   * a member) while their own address is outside the verified domains — so passwords are refused
+   * AND their org's provider will not assert for them either, because assertions are confined to
+   * verified domains. There is no self-service way back: no route removes a membership, and
+   * password reset succeeds but login still refuses. A review walked into it on the happy path.
+   *
+   * They are told exactly which address is the problem, and what to do about it.
+   */
+  const domains = enforcingDomains(req.orgId);
+  const at = String(req.user.email || '').lastIndexOf('@');
+  const ownDomain = at === -1 ? '' : String(req.user.email).slice(at + 1).toLowerCase().replace(/\.+$/, '');
+  if (!domains.includes(ownDomain)) {
+    return res.status(400).json({
+      error: `Your own address (${req.user.email}) is not at a verified domain (${domains.join(', ')}), `
+        + 'so requiring single sign-on would lock you out with no way back. Verify that domain first, '
+        + 'or hand ownership to someone whose address is covered.',
+      code: 'would_lock_out_actor',
+    });
+  }
+
+  /*
+   * Everyone ELSE in the same position is reported rather than refused — they may be exactly the
+   * contractors this is meant to shut out. But the admin must find out here, not from a support
+   * ticket after the fact.
+   */
+  const stranded = db.prepare(`
+    SELECT DISTINCT u.email FROM users u
+     WHERE u.id IN (
+       SELECT m.user_id FROM organization_members m WHERE m.organization_id = ?
+       UNION
+       SELECT wm.user_id FROM workspace_members wm JOIN workspaces w ON w.id = wm.workspace_id
+        WHERE w.organization_id = ?
+     )
+  `).all(req.orgId, req.orgId)
+    .map((r) => r.email)
+    .filter((e) => {
+      const i = String(e).lastIndexOf('@');
+      return i === -1 || !domains.includes(String(e).slice(i + 1).toLowerCase().replace(/\.+$/, ''));
+    });
   db.prepare('UPDATE organizations SET sso_only = 1 WHERE id = ?').run(req.orgId);
-  logActivity(req.user.id, 'org_sso_only_enabled', `org=${req.orgId}`, null, getClientIp(req));
-  console.log(`[org-sso] SSO-only ENABLED for org ${req.orgId} by ${req.user.email}`);
-  res.json({ sso_only: true });
+  logActivity(req.user.id, 'org_sso_only_enabled',
+    `org=${req.orgId} stranded=${stranded.length}`, null, getClientIp(req));
+  console.log(`[org-sso] SSO-only ENABLED for org ${req.orgId} by ${req.user.email}`
+    + (stranded.length ? ` — ${stranded.length} member(s) outside the verified domains: ${stranded.join(', ')}` : ''));
+  res.json({ sso_only: true, stranded_members: stranded });
 });
 
 /*
@@ -825,7 +914,7 @@ router.delete('/:orgId/sso/:id', requireOrgAdmin, requireVerifiedAdmin, (req, re
    * absence of configuration — which is what made an unset GOOGLE_CLIENT_ID look like a deletion.
    */
   try {
-    assertNotLastEnforcingProvider(req.orgId, existing.id, 'deleting this provider');
+    assertEnforcementNotReduced(req.orgId, existing.id, [], 'deleting this provider');
   } catch (e) {
     return res.status(e.status || 400).json({ error: e.message, code: e.code });
   }

@@ -310,7 +310,9 @@ function ssoOnlyForEmail(email) {
   if (!conn) return null;
   const at = String(email || '').lastIndexOf('@');
   if (at === -1) return null;
-  const domain = String(email).slice(at + 1).toLowerCase().trim();
+  // A trailing root dot is the same domain; `acme.test.` slipped the match and let someone
+  // register at an SSO-only domain (a distinct string, so no squat — but a hole in the gate).
+  const domain = String(email).slice(at + 1).toLowerCase().trim().replace(/\.+$/, '');
   if (!domain) return null;
   try {
     return conn.prepare(`
@@ -365,15 +367,29 @@ function ssoOnlyForUser(user) {
   const conn = db();
   if (!conn) return null;
   try {
+    /*
+     * ⚠️ WORKSPACE membership, not just organization_members.
+     *
+     * Almost nobody is in `organization_members`: only three places write it (creating an org,
+     * an org-SSO login, a platform admin creating an org) and nothing ever deletes a row. Every
+     * INVITED user, every admin-created account and every workspace assignment lands in
+     * `workspace_members` and nowhere else — so an earlier version of this check covered org
+     * owners and people who had already used SSO, which is exactly the set the domain check
+     * already caught. A review invited an outside address into an SSO-only tenant and kept
+     * password login, then used it to invite more.
+     */
     return conn.prepare(`
       SELECT o.id AS organization_id, o.name AS organization_name
-        FROM organization_members m
-        JOIN organizations o ON o.id = m.organization_id
-       WHERE m.user_id = ? AND o.sso_only = 1
+        FROM organizations o
+       WHERE o.sso_only = 1
+         AND (EXISTS (SELECT 1 FROM organization_members m WHERE m.organization_id = o.id AND m.user_id = ?)
+           OR EXISTS (SELECT 1 FROM workspace_members wm
+                        JOIN workspaces w ON w.id = wm.workspace_id
+                       WHERE w.organization_id = o.id AND wm.user_id = ?))
        LIMIT 1
-    `).get(user.id) || null;
+    `).get(user.id, user.id) || null;
   } catch (e) {
-    if (/no such table: (organization_members|organizations)/i.test(e.message)) return null;
+    if (/no such table: (organization_members|organizations|workspace_members|workspaces)/i.test(e.message)) return null;
     throw e;   // drift on a table that exists — fail closed; the caller refuses the login
   }
 }

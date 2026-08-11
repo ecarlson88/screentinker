@@ -565,9 +565,18 @@ function rateLimit(windowMs, maxRequests) {
        *
        * Ids are collapsed to a placeholder so the SHAPE of the endpoint is the key.
        */
+      /*
+       * Order matters: the most specific shapes first, because the generic org-id fold would
+       * otherwise eat `sso-only` as an organization id and leave the request id free — which is
+       * how two of these stayed unlimited after the first attempt.
+       */
+      .replace(/^\/api\/organizations\/sso-only\/removal-requests\/[^/]+\/[^/]+/, '/api/organizations/sso-only/removal-requests/:id/:decision')
+      .replace(/^\/api\/organizations\/sso-only\/removal-requests/, '/api/organizations/sso-only/removal-requests')
       .replace(/^(\/api\/organizations)\/[^/]+/, '$1/:id')
+      .replace(/^(\/api\/organizations\/:id\/sso-only\/removal-request)\/[^/]+/, '$1/:id')
       .replace(/^(\/api\/organizations\/:id\/sso)\/[^/]+/, '$1/:id')
-      .replace(/(\/domains)\/[^/]+/, '$1/:id')
+      // Anchored under the organizations mount so it cannot surprise a future limiter elsewhere.
+      .replace(/^(\/api\/organizations\/:id\/sso\/:id\/domains)\/[^/]+/, '$1/:id')
       || '/';
     const key = getClientIp(req) + normalisedPath;
     const now = Date.now();

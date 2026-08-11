@@ -3,6 +3,7 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
 const { db } = require('../db/database');
+const oidcProviders = require('../lib/oidc-providers');
 const { canAdminWorkspace } = require('../lib/permissions');
 const { requirePlatformAdmin, requireAdmin } = require('../middleware/auth');
 const { logActivity, getClientIp } = require('../services/activity');
@@ -77,6 +78,27 @@ router.post('/users', (req, res) => {
       return res.status(400).json({
         error: `${org.name || 'This organization'} requires single sign-on, so password accounts cannot be created. Invite the person through your identity provider instead.`,
         code: 'sso_only_org',
+      });
+    }
+  }
+
+  /*
+   * ⚠️ And the ADDRESS's own domain, wherever it is being created.
+   *
+   * Gating only on the target workspace left the squat open through a different door: create your
+   * own organization, then mint `cfo@theircompany.test` into YOUR workspace. Login is refused, so
+   * it is not access — but the row now has a password_hash, and an SSO login will not adopt a row
+   * that has one. The real CFO can then never sign in through their own identity provider, and a
+   * password reset they CAN complete lands them at a login that refuses them. Permanent, with no
+   * self-service way out, for any address at any SSO-only customer.
+   */
+  if (req.user.role !== 'platform_admin') {
+    let ownedBy = null;
+    try { ownedBy = oidcProviders.ssoOnlyForEmail(email); } catch { ownedBy = { unavailable: true }; }
+    if (ownedBy) {
+      return res.status(400).json({
+        error: 'That email domain uses single sign-on, so a password account cannot be created for it.',
+        code: 'sso_only_domain',
       });
     }
   }
