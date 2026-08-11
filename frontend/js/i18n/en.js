@@ -214,6 +214,7 @@ export default {
   // Both of these used to fall through to "please try again", which is advice that can never work:
   // retrying is exactly what will not help, and the user needs to be told who to talk to instead.
   'auth.sso_required': 'Your organization requires single sign-on. Use \u201cContinue with single sign-on\u201d above \u2014 your password will not work here.',
+  'auth.sso_err_sso_required': 'Your organization requires its own single sign-on. Use the single sign-on option for your organization.',
   'auth.sso_err_domain_not_allowed': 'Your organization has not verified that email domain for sign-in. Ask your administrator to verify it in ScreenTinker.',
   'auth.sso_err_account_exists_other_provider': 'An account with this email already exists and signs in through a different provider. Use that provider, or ask your administrator.',
   'auth.signin_microsoft': 'Sign in with Microsoft',

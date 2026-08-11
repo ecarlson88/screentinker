@@ -109,8 +109,22 @@ function preflight() {
        * throw away a working tree to fix one missing package.
        */
       const hasLock = fs.existsSync(path.join(SERVER_DIR, 'package-lock.json'));
-      if (hasLock && nodeModulesAbsent) run(['ci', '--omit=dev', '--no-audit', '--no-fund'], 'installing');
-      else run(['install', '--omit=dev', '--no-audit', '--no-fund'], 'installing');
+      if (hasLock && nodeModulesAbsent) {
+        // Nothing installed, so `ci` has nothing to destroy and gives a reproducible tree.
+        run(['ci', '--omit=dev', '--no-audit', '--no-fund'], 'installing');
+      } else {
+        /*
+         * ⚠️ Install ONLY what is missing, by name, and never `--omit=dev` on a populated tree.
+         *
+         * `npm install --omit=dev` reconciles the whole tree, which PRUNES devDependencies — so
+         * merely starting the server deleted socket.io-client, puppeteer-core and js-yaml, and broke
+         * `npm test`. A review watched it happen. A boot-time repair that quietly removes packages
+         * is worse than the failure it fixes, so this touches nothing it was not asked to.
+         *
+         * `--no-save` because a server starting up has no business editing package.json.
+         */
+        run(['install', '--no-save', '--no-audit', '--no-fund', ...missing], 'installing missing packages');
+      }
     } catch (e) {
       fail(`could not install dependencies: ${e && e.message}`,
         'Run `npm ci --omit=dev` in the server directory, or check network access to the npm registry.');
