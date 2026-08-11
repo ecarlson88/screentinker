@@ -427,7 +427,7 @@ one would offer every Gmail user a "sign in with your organization" button point
 infrastructure — phishing launched from this product's own login page — and would let one account
 deny a public domain to everyone else.
 
-### Proving a domain
+##### Proving a domain
 
 A claimed domain **routes nobody and authenticates nobody until DNS proves the organization controls
 it.** Typing a domain into a form reserves the name and nothing more.
@@ -477,7 +477,7 @@ Signing in through an organization's provider makes the user a member of that or
 demotes anyone. Client secrets are optional (PKCE), and are stored AES-256-GCM encrypted and never
 returned by the API.
 
-### Requiring single sign-on
+##### Requiring single sign-on
 
 An organization can turn off password sign-in for its verified domains, so its identity provider is
 the only way in — which is the point of buying SSO: the IdP holds the MFA, the conditional access
