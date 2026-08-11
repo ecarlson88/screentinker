@@ -373,9 +373,15 @@ and keys are discovered from it and cached.
 
 **Account rules.** A provider must assert a verified email, because the whole account model keys on
 it. An SSO login never takes over an existing account that has a password — the owner signs in
-locally and links from Settings. An account with no password is re-pointed at whichever provider
-authenticated it. If the provider's stable subject (`sub`) changes for an address, the login is
-refused rather than handing over an account to a recycled mailbox.
+locally and links from Settings. If the provider's stable subject (`sub`) changes for an address, the
+login is refused rather than handing an account to a recycled mailbox.
+
+An account established by one provider is **not** adopted by another. A per-organization provider may
+only claim an account that its own organization established, or a `local` account that has never set
+a password (an invited user signing in for the first time); anything else is refused with
+`account_exists_other_provider`. The earlier rule — "any account without a password may be re-pointed
+at whichever provider spoke last" — was safe only while the operator chose every provider, and became
+an account-takeover primitive the moment customers could add their own.
 
 ⚠️ **TOTP is not prompted on an SSO login.** Second-factor is the identity provider's job in this
 flow, matching the long-standing behaviour of the SSO and API-token paths.
@@ -389,10 +395,16 @@ An organization can also bring **its own** identity provider, configured by an o
 **Settings → Single sign-on**. No environment variable or restart is involved.
 
 A per-org provider is **never listed publicly**. It appears only when someone types an email address
-at one of that organization's domains, at which point the login page offers a generic
-"Continue with single sign-on" button. The domain lookup answers with a boolean and nothing else —
-no provider name, no slug — so a guessed domain cannot confirm who a customer is, and the mapping
-back to a provider happens server-side on submit. Both endpoints are rate limited.
+at one of that organization's **verified** domains, at which point the login page offers a generic
+"Continue with single sign-on" button. The domain lookup answers only whether that domain uses SSO
+and whether it is required — never a provider name or slug — so a guessed domain cannot confirm who
+a customer is, and the mapping back to a provider happens server-side on submit. Both endpoints are
+rate limited.
+
+**Instance-wide is the default; an organization overrides only its own verified domains.** Type an
+address whose domain no organization has verified and you get the local password form plus every
+instance provider you configured. Type one that an organization has verified and its own button is
+added — and if that organization requires SSO, it becomes the only option.
 
 Each provider gets a randomly generated redirect URI, shown in Settings, which the admin registers
 with their identity provider:
@@ -440,20 +452,17 @@ describe a check that can never pass.
 whoever controls its target prove the domain, turning an ordinary subdomain takeover into control of
 every `@example.com` login. A delegated proof name is refused, which is stricter than ACME's dns-01.
 
-**An unverified claim lapses, and lapsing RELEASES it.** Pressing Verify on an expired claim does
-not reissue it in place — that renewed the clock, so one request per window held a domain forever.
-The claim is released, the domain is free for anyone else, and re-adding it is a new claim: new
-token, and the operator is notified again. Squatting is not impossible; it is loud.
+**An unverified claim lapses after 8 hours, and lapsing RELEASES it.** Pressing Verify on an
+expired claim does not reissue it in place — that renewed the clock, so one request per window held
+a domain forever. The claim is released, the domain becomes free for anyone else, and re-adding it
+is a new claim: new token, and the operator is notified again. A verified domain never expires;
+re-proving on a timer would log a customer out over a DNS edit made months afterwards. Squatting is
+not made impossible — it is made loud.
 
 **Deleting a provider releases its domains and returns its accounts to local sign-in**, so the
 organization can re-claim its own domain and its people can recover by password reset. Both used to
 be stranded: a verified domain row outlived its provider and blocked that domain for everyone
 permanently, and its users could neither sign in nor reset.
-
-**An unverified claim lapses after 8 hours**, and lapsing rotates the token. This is what stops
-squatting: a tenant cannot type a company's domain and hold it against the real owner, and a record
-left in DNS from an abandoned attempt cannot satisfy a later claim. A verified domain never expires —
-re-proving on a timer would log a customer out over a DNS edit made months afterwards.
 
 Platform admins are emailed whenever a domain is claimed. Verification is what makes an unowned
 claim worthless; the notification is what makes an attempt visible. Nothing is ever sent to the
@@ -467,6 +476,47 @@ Signing in through an organization's provider makes the user a member of that or
 (`org_member`). Existing members keep whatever role they already have — logging in never promotes or
 demotes anyone. Client secrets are optional (PKCE), and are stored AES-256-GCM encrypted and never
 returned by the API.
+
+### Requiring single sign-on
+
+An organization can turn off password sign-in for its verified domains, so its identity provider is
+the only way in — which is the point of buying SSO: the IdP holds the MFA, the conditional access
+and the instant removal of access, and a password box beside it is a way around all three.
+
+Settings → Single sign-on → **Require single sign-on**. It needs at least one verified domain, so an
+organization cannot leave its own people with no way to sign in, and cannot switch off passwords for
+a domain it merely typed.
+
+When it is on:
+
+- the login page **hides** the password field for those domains rather than letting someone type a
+  password that is going to be refused and then send them to reset it;
+- `POST /api/auth/login` refuses with `403 sso_required` — distinguishable from a wrong password,
+  because the page must not tell a user to fix a credential that is not the problem;
+- **every other identity provider is refused too**, including the instance's own Google or
+  Microsoft. Those belong to the operator and are not domain-restricted, so leaving them available
+  would be a side door straight past the customer's MFA — blocking passwords while leaving
+  "Continue with Google" is not requiring single sign-on, it is renaming the bypass.
+
+**Turning it off is a request, not a switch.** That direction re-opens password sign-in, so it is
+the direction an attacker who has taken an org admin would take, and it is also what a customer will
+demand at their worst moment — identity provider down, nobody can work — which is exactly when a
+self-service toggle gets flipped without thinking. The org admin files a request; a **platform admin
+approves it**, and nothing changes until they do.
+
+The approval email deliberately carries **no action link**. A token that acts on its own would turn
+every forwarded, archived or auto-previewed copy of that message into a way to switch off a
+customer's single sign-on. The decision is made signed in, under Admin.
+
+⚠️ **`platform_admin` is exempt from enforcement, and that exemption is load-bearing.** The operator
+is who approves removal. If the operator's own address sat at an SSO-only domain and that identity
+provider broke, nobody could sign in to approve anything and the instance would be bricked with no
+way out. It is the break-glass — it applies to the people running the server, never to a customer's
+own admins.
+
+⚠️ **This makes the approval queue an availability dependency.** An organization whose IdP breaks is
+locked out until an operator acts. That is the intended trade — deliberate friction on the dangerous
+direction — but it should be a decision, not a surprise.
 
 #### Email (Microsoft Graph or SMTP)
 
