@@ -210,6 +210,17 @@ function renderWidgetHtml(type, config, opts = {}) {
   }
 }
 
+// The widget editor's Preview is framed by the DASHBOARD, from the dashboard's own
+// origin, and the dashboard keeps its session JWT in localStorage. So preview HTML is
+// pinned to the isolating sandbox and never consults the org setting: otherwise anyone
+// who can author a widget (workspace_editor and up) could run script in the dashboard
+// origin and lift the session of whichever admin clicked Preview.
+//
+// The org setting exists so PLAYERS can embed origin-strict third-party sites. A player
+// runs on a kiosk with a device token, which is the risk the confirmation modal
+// describes; an admin's dashboard session is not.
+const PREVIEW_IFRAME_SANDBOX = 'allow-scripts';
+
 function widgetIframeSandboxForWorkspace(workspaceId) {
   if (!workspaceId) return 'allow-scripts';
   try {
@@ -328,8 +339,9 @@ router.post('/preview', (req, res) => {
   const { widget_type, config } = req.body || {};
   if (!widget_type || typeof widget_type !== 'string') return res.status(400).json({ error: 'widget_type required' });
   if (!KNOWN_WIDGET_TYPES.has(widget_type)) return res.status(400).json({ error: 'Unknown widget_type' });
-  const iframeSandbox = widgetIframeSandboxForWorkspace(req.workspaceId);
-  let html = renderWidgetHtml(widget_type, config || {}, { iframeSandbox });
+  // Preview renders inside the DASHBOARD origin, so it never opts into same-origin —
+  // see PREVIEW_IFRAME_SANDBOX.
+  let html = renderWidgetHtml(widget_type, config || {}, { iframeSandbox: PREVIEW_IFRAME_SANDBOX });
   if (req.workspaceId) html = inlineUserContent(html, req.workspaceId);
   res.setHeader('Content-Type', 'text/html');
   res.send(html);
@@ -351,8 +363,8 @@ router.post('/preview-session', (req, res) => {
   if (!widget_type || typeof widget_type !== 'string') return res.status(400).json({ error: 'widget_type required' });
   if (!KNOWN_WIDGET_TYPES.has(widget_type)) return res.status(400).json({ error: 'Unknown widget_type' });
   const id = uuidv4();
-  const iframeSandbox = widgetIframeSandboxForWorkspace(req.workspaceId);
-  const html = renderWidgetHtml(widget_type, config || {}, { iframeSandbox });
+  // Same reasoning as /preview — dashboard origin, never same-origin.
+  const html = renderWidgetHtml(widget_type, config || {}, { iframeSandbox: PREVIEW_IFRAME_SANDBOX });
   previewStore.set(id, { html, widget_type, created: Date.now() });
   res.json({ id, url: `/api/widgets/preview-session/${id}` });
 });
