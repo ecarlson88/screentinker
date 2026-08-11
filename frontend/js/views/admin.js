@@ -348,11 +348,17 @@ async function loadUsers() {
         <tbody>
           ${users.map(u => `
             <tr style="border-bottom:1px solid var(--border)">
-              <td style="padding:8px"><div style="font-weight:500">${u.name || u.email}</div><div style="font-size:11px;color:var(--text-muted)">${u.email}</div></td>
-              <td style="padding:8px"><span style="background:var(--bg-primary);padding:2px 8px;border-radius:10px;font-size:11px">${u.auth_provider}</span></td>
+              <!-- ESCAPED: these come from self-registration and from an identity provider's
+                   email claim, so they are attacker-chosen. A reviewer registered an address whose
+                   local part was an img tag with an onerror handler, anonymously, and got script
+                   execution in the PLATFORM ADMIN's session on this page - the very page operators
+                   are now emailed to. Note backticks are illegal here: this sits inside a template
+                   literal. -->
+              <td style="padding:8px"><div style="font-weight:500">${esc(u.name || u.email)}</div><div style="font-size:11px;color:var(--text-muted)">${esc(u.email)}</div></td>
+              <td style="padding:8px"><span style="background:var(--bg-primary);padding:2px 8px;border-radius:10px;font-size:11px">${esc(u.auth_provider)}</span></td>
               <td style="padding:8px;font-size:11px;color:var(--text-muted)">${u.last_login ? new Date(u.last_login * 1000).toLocaleString() : t('common.never')}</td>
               <td style="padding:8px">
-                <select class="input" style="max-width:120px;width:100%;background:var(--bg-input);font-size:12px;padding:4px" data-role-user="${u.id}">
+                <select class="input" style="max-width:120px;width:100%;background:var(--bg-input);font-size:12px;padding:4px" data-role-user="${esc(u.id)}">
                   ${PLATFORM_ROLE_OPTIONS.map(r => `<option value="${r}" ${u.role === r ? 'selected' : ''}>${t('admin.role.' + r)}</option>`).join('')}
                 </select>
               </td>

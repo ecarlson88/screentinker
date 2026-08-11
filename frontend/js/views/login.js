@@ -601,17 +601,46 @@ function setupHandlers(config, isSetup) {
        * mapping again on submit, so the slug is never published to the page. POST keeps the address
        * out of the URL, browser history and any Referer the provider's page would send.
        */
+      /*
+       * A BUTTON that fetches and then navigates — not a form that submits.
+       *
+       * The dashboard's CSP is `form-action 'self'`, and Chrome applies it across the whole
+       * redirect chain, so a form POST that 302s on to the customer's identity provider was
+       * ABORTED with nothing shown to the user at all. The provider origins cannot be allowlisted
+       * because customers supply them. A script-initiated navigation is not covered by
+       * form-action, so the page asks the server where to go and goes there.
+       *
+       * Styled secondary: "Sign In" is the primary action while a password still works, and two
+       * identical blue buttons stacked one above the other sent people to their IdP by muscle
+       * memory after typing a password.
+       */
       slot.innerHTML = `
-        <form method="POST" action="/api/auth/sso/start">
-          <input type="hidden" name="email" value="${esc(email)}">
-          <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;padding:10px">
-            ${t('auth.signin_sso')}
-          </button>
-        </form>
+        <button type="button" id="orgSsoBtn" class="btn ${data.required ? 'btn-primary' : 'btn-secondary'}"
+                style="width:100%;justify-content:center;padding:10px">
+          ${t('auth.signin_sso')}
+        </button>
         <div style="font-size:11px;color:var(--text-muted);margin-top:6px;text-align:center">
           ${t('auth.sso_org_hint')}
         </div>`;
       slot.style.display = '';
+
+      const btn = slot.querySelector('#orgSsoBtn');
+      if (btn) btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        try {
+          const r = await fetch('/api/auth/sso/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify({ email }),
+          });
+          const body = await r.json().catch(() => ({}));
+          if (!r.ok || !body.start_url) throw new Error(body.error || `start ${r.status}`);
+          window.location.assign(body.start_url);
+        } catch {
+          btn.disabled = false;
+          showError(t('auth.sso_err_provider_unavailable'));
+        }
+      });
     } catch {
       // A failed lookup must never block a password login — the form still works, and the password
       // box comes back rather than leaving someone staring at a form with no way to submit it.

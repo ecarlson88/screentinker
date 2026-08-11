@@ -102,6 +102,15 @@ router.post('/register', (req, res) => {
   }
   const { email, password, name, createOrg } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+  /*
+   * Registration accepted anything with an @ in it, so `<img/src=q/onerror=alert(1)>@acme.test`
+   * became a real row — markup with no spaces, which is why it also slipped the asserted-email
+   * check. Rendering is escaped now, but an address that is not an address has no business being
+   * stored: it is displayed on operator screens, put in emails, and compared against domains.
+   */
+  if (!ASSERTED_EMAIL_RE.test(String(email).toLowerCase()) || /[<>"'`\\]/.test(String(email))) {
+    return res.status(400).json({ error: 'Enter a valid email address' });
+  }
   if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
 
   /*
@@ -1168,10 +1177,32 @@ router.get('/sso/discover', (req, res) => {
  */
 router.post('/sso/start', express.urlencoded({ extended: false }), (req, res) => {
   const provider = oidcProviders.forEmail((req.body && req.body.email) || req.query.email);
-  // An unknown domain is answered exactly like a known one that is disabled: back to the login page
-  // with nothing learned.
-  if (!provider) return res.redirect('/app#/login?sso_error=unknown_provider');
-  res.redirect(`/api/auth/oidc/${encodeURIComponent(provider.slug)}/start`);
+  /*
+   * ⚠️ ANSWER WITH JSON when the page asks for it, rather than a redirect.
+   *
+   * This used to be a plain <form method="POST"> that 302'd on to the provider. Chrome applies
+   * `form-action` to the WHOLE redirect chain, and the dashboard's CSP sets `form-action 'self'`
+   * (server.js), so the hop to the identity provider was aborted — silently. The user clicked
+   * "Continue with single sign-on" and NOTHING happened: no navigation, no error, an unchanged
+   * page. Per-organization SSO, the whole point of this feature, could never work in a browser.
+   *
+   * The origins cannot simply be allowlisted: they are supplied by customers at runtime. So the
+   * page fetches this, then navigates itself — a script-initiated navigation is not governed by
+   * form-action. The redirect is kept for a caller without JavaScript, where the chain is
+   * same-origin up to the point the provider's own page takes over.
+   *
+   * The slug in the answer is not a disclosure: following the old redirect put it in the address
+   * bar, the network log and history anyway. What stays private is the mapping for a domain the
+   * caller cannot name — an unknown domain answers exactly like a disabled one.
+   */
+  const wantsJson = String(req.get('accept') || '').includes('application/json');
+  if (!provider) {
+    if (wantsJson) return res.status(404).json({ error: 'unknown_provider', code: 'unknown_provider' });
+    return res.redirect('/app#/login?sso_error=unknown_provider');
+  }
+  const startUrl = `/api/auth/oidc/${encodeURIComponent(provider.slug)}/start`;
+  if (wantsJson) return res.json({ start_url: startUrl });
+  res.redirect(startUrl);
 });
 
 router.get('/oidc/:slug/start', asyncRoute(async (req, res) => {
