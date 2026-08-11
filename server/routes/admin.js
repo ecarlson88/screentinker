@@ -3,6 +3,7 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
 const { db } = require('../db/database');
+const oidcProviders = require('../lib/oidc-providers');
 const { canAdminWorkspace } = require('../lib/permissions');
 const { requirePlatformAdmin, requireAdmin } = require('../middleware/auth');
 const { logActivity, getClientIp } = require('../services/activity');
@@ -20,7 +21,9 @@ const { platformDefaultRow, HARDCODED_BRANDING, PLATFORM_DEFAULT_ID } = require(
 //     have no user/role-management power (#13).
 
 // Same email shape the invite-create endpoint validates against (workspaces.js).
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Markup characters are not legal here. The looser form admitted < > " ' and an admin-
+// chosen email became stored XSS in the platform admin's user list.
+const EMAIL_RE = /^[^\s@<>"'`\\;,()\[\]]+@[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$/;
 const WORKSPACE_ROLES = ['workspace_admin', 'workspace_editor', 'workspace_viewer'];
 // Mirror the server-side minimum enforced by PUT /api/auth/me and register.
 const MIN_PASSWORD_LENGTH = 8;
@@ -55,6 +58,53 @@ router.post('/users', (req, res) => {
   if (!canAdminWorkspace(db, req.user, ws)) {
     return res.status(403).json({ error: 'Admin access required' });
   }
+  /*
+   * ⚠️ An SSO-only organization must not have password accounts minted into it.
+   *
+   * This route creates a LOCAL account with an admin-chosen password, and it accepts any address —
+   * so on a tenant that requires single sign-on it was a one-call backdoor: create
+   * `contractor@somewhere-else.test` bound to the workspace, log in with the password, and every
+   * control the customer turned SSO-only on for is behind you. A review did exactly that, and the
+   * account it created could then mint another.
+   *
+   * platform_admin keeps the ability, because that is the operator break-glass — the same
+   * exemption the login gate makes, for the same reason.
+   */
+  if (req.user.role !== 'platform_admin' && ws.organization_id) {
+    // The table is absent on a single-tenant install; that simply means no organization requires
+    // single sign-on, so creation proceeds.
+    let org = null;
+    try { org = db.prepare('SELECT sso_only, name FROM organizations WHERE id = ?').get(ws.organization_id); }
+    catch { org = null; }
+    if (org && org.sso_only) {
+      return res.status(400).json({
+        error: `${org.name || 'This organization'} requires single sign-on, so password accounts cannot be created. Invite the person through your identity provider instead.`,
+        code: 'sso_only_org',
+      });
+    }
+  }
+
+  /*
+   * ⚠️ And the ADDRESS's own domain, wherever it is being created.
+   *
+   * Gating only on the target workspace left the squat open through a different door: create your
+   * own organization, then mint `cfo@theircompany.test` into YOUR workspace. Login is refused, so
+   * it is not access — but the row now has a password_hash, and an SSO login will not adopt a row
+   * that has one. The real CFO can then never sign in through their own identity provider, and a
+   * password reset they CAN complete lands them at a login that refuses them. Permanent, with no
+   * self-service way out, for any address at any SSO-only customer.
+   */
+  if (req.user.role !== 'platform_admin') {
+    let ownedBy = null;
+    try { ownedBy = oidcProviders.ssoOnlyForEmail(email); } catch { ownedBy = { unavailable: true }; }
+    if (ownedBy) {
+      return res.status(400).json({
+        error: 'That email domain uses single sign-on, so a password account cannot be created for it.',
+        code: 'sso_only_domain',
+      });
+    }
+  }
+
   // Stamp the target workspace so the activityLogger middleware (and our
   // explicit audit row) attribute to the right tenant.
   req.workspaceId = ws.id;

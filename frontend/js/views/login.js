@@ -1,5 +1,33 @@
 import { showToast } from '../components/toast.js';
 import { t } from '../i18n.js';
+import { esc } from '../utils.js';
+
+
+/*
+ * A recognisable mark for the providers people expect to see, and an honest generic one for
+ * everything else. Inline SVG rather than a remote image: an <img> to a provider CDN would put a
+ * third-party origin back into the CSP, which is precisely what moving the flow server-side removed.
+ */
+const PROVIDER_ICONS = {
+  google: `<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/>
+    <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+    <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+    <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+  </svg>`,
+  microsoft: `<svg width="18" height="18" viewBox="0 0 21 21" aria-hidden="true">
+    <rect x="1" y="1" width="9" height="9" fill="#f25022"/>
+    <rect x="11" y="1" width="9" height="9" fill="#7fba00"/>
+    <rect x="1" y="11" width="9" height="9" fill="#00a4ef"/>
+    <rect x="11" y="11" width="9" height="9" fill="#ffb900"/>
+  </svg>`,
+};
+
+const GENERIC_ICON = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+  <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+</svg>`;
+
+const providerIcon = (slug) => PROVIDER_ICONS[slug] || GENERIC_ICON;
 
 let authConfig = null;
 
@@ -77,8 +105,19 @@ export async function render(container) {
               <input type="email" id="loginEmail" class="input" placeholder="${t('auth.placeholder_email')}" autocomplete="email">
             </div>
             <div class="form-group">
-              <label>${t('auth.password')}</label>
+              <label id="loginPasswordLabel" for="loginPassword">${t('auth.password')}</label>
               <input type="password" id="loginPassword" class="input" placeholder="${t('auth.placeholder_password')}" autocomplete="current-password">
+            <!-- Filled in only when the typed email belongs to an organization that has configured
+                 its own identity provider. A customer's IdP is never listed to everyone: the button
+                 appears for the people it belongs to and nobody else, which also keeps the customer
+                 list off the login page.
+
+                 ⚠️ BELOW the input, inside the same group. Above it, the button sat between the
+                 "Password" label and its field — so the label described the SSO button and the
+                 password box had none at all. It has to stay INSIDE the group, because hiding the
+                 group is how the password is hidden and the button must survive that... which is
+                 exactly why setPasswordVisible() hides the FIELD, never the container. -->
+            <div id="orgSsoSlot" style="display:none;margin-top:12px"></div>
             </div>
             ${isSetup ? `
             <div class="form-group">
@@ -148,39 +187,32 @@ export async function render(container) {
           </div>
 
           <div id="ssoBlock">
-          ${config.googleEnabled || config.microsoftEnabled ? `
-          <div style="display:flex;align-items:center;gap:12px;margin:20px 0">
+          ${(config.providers || []).length ? `
+          <div id="ssoDivider" style="display:flex;align-items:center;gap:12px;margin:20px 0">
             <hr style="flex:1;border-color:var(--border)">
             <span style="color:var(--text-muted);font-size:12px">${t('auth.divider_or')}</span>
             <hr style="flex:1;border-color:var(--border)">
           </div>
           ` : ''}
 
-          ${config.googleEnabled ? `
-          <div id="googleSignInContainer">
-            <button class="btn btn-secondary" id="googleSignInBtn" style="width:100%;justify-content:center;padding:10px;gap:8px">
-              <svg width="18" height="18" viewBox="0 0 24 24">
-                <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/>
-                <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
-                <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
-                <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
-              </svg>
-              ${t('auth.signin_google')}
-            </button>
+          <!-- One button per configured provider, and each is a plain LINK to a server endpoint.
+               There is no provider SDK on this page: the browser never speaks to the identity
+               provider directly, so nothing here needs a client id and the CSP needs no
+               third-party script origin. Google and Microsoft are ordinary entries in this list.
+               The icon is chosen by slug where we have one and falls back to a generic mark, so a
+               self-hoster's Keycloak or Authentik still gets a real-looking button. -->
+          <!-- Wrapped so the whole set can be hidden at once: an organization that REQUIRES its own
+               identity provider must not be shown the operator's, which are not domain-confined. -->
+          <div id="instanceProviders">
+          ${(config.providers || []).map((p) => `
+          <a class="btn btn-secondary" href="/api/auth/oidc/${encodeURIComponent(p.slug)}/start"
+             id="sso-${esc(p.slug)}"
+             style="width:100%;justify-content:center;padding:10px;gap:8px;margin-top:8px;text-decoration:none">
+            ${providerIcon(p.slug)}
+            ${esc(t('auth.signin_with', { provider: p.name }))}
+          </a>
+          `).join('')}
           </div>
-          ` : ''}
-
-          ${config.microsoftEnabled ? `
-          <button class="btn btn-secondary" id="microsoftSignInBtn" style="width:100%;justify-content:center;padding:10px;gap:8px;margin-top:8px">
-            <svg width="18" height="18" viewBox="0 0 21 21">
-              <rect x="1" y="1" width="9" height="9" fill="#f25022"/>
-              <rect x="11" y="1" width="9" height="9" fill="#7fba00"/>
-              <rect x="1" y="11" width="9" height="9" fill="#00a4ef"/>
-              <rect x="11" y="11" width="9" height="9" fill="#ffb900"/>
-            </svg>
-            ${t('auth.signin_microsoft')}
-          </button>
-          ` : ''}
           </div>
         </div>
 
@@ -284,6 +316,12 @@ function setupHandlers(config, isSetup) {
         body: JSON.stringify({ email, password })
       });
       const data = await res.json();
+      /*
+       * The organization requires its identity provider, so this is not a credential failure and
+       * must not read like one — "invalid password" sends the user to reset a password that will
+       * never work again. Point them at the control that does work.
+       */
+      if (!res.ok && data.code === 'sso_required') { showError(t('auth.sso_required')); return; }
       if (!res.ok) { showError(data.error); return; }
       // Unverified account (hosted hard-gate): no session — prompt to check email.
       if (data.verification_required) { showVerifyNotice(data.email || email); return; }
@@ -451,66 +489,214 @@ function setupHandlers(config, isSetup) {
     }
   }
 
-  // Google Sign-In
-  if (config.googleEnabled) {
-    document.getElementById('googleSignInBtn')?.addEventListener('click', async () => {
-      try {
-        // Use Google's popup-based sign in
-        const client = google.accounts.oauth2.initTokenClient({
-          client_id: config.googleClientId,
-          scope: 'email profile',
-          callback: async (response) => {
-            if (response.access_token) {
-              // Get ID token via Google's tokeninfo
-              const tokenRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${response.access_token}`);
-              const tokenData = await tokenRes.json();
-              // Send to our server
-              const res = await fetch('/api/auth/google', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ credential: response.access_token, email: tokenData.email })
-              });
-              const data = await res.json();
-              if (res.ok) onAuthSuccess(data);
-              else showError(data.error);
-            }
-          }
-        });
-        client.requestAccessToken();
-      } catch (err) {
-        showError(t('auth.error_google_failed'));
-      }
-    });
+  /*
+   * SSO is a link, not a script.
+   *
+   * The buttons above are anchors to /api/auth/oidc/<slug>/start, so there is nothing to bind here
+   * and no SDK to wait for. What DOES need handling is the trip back: the callback redirects to
+   * #/login carrying either a session token or an error code.
+   *
+   * The token rides in the URL FRAGMENT, which browsers never send to servers and proxies never
+   * log — and it is stripped from the address bar before anything else happens, so a shared screen
+   * or a copied URL does not carry a live session.
+   */
+  /*
+   * Email-first SSO for organizations.
+   *
+   * Instance-wide providers are always on the page. An ORG provider is different — it belongs to
+   * one customer — so it is fetched by domain once the address looks complete, and only then.
+   *
+   * Debounced because this fires while someone types, and the endpoint is rate limited; asking on
+   * every keystroke would spend a user's whole budget before they finished their own address.
+   */
+  let ssoLookupTimer = null;
+  let lastDomainAsked = '';
+  const orgSlot = () => document.getElementById('orgSsoSlot');
+
+  /*
+   * Show or hide the password half of the sign-in form.
+   *
+   * Presentation only — the server refuses a password for these accounts regardless. Restoring it
+   * on every negative answer matters as much as hiding it: someone who types an SSO-only address,
+   * then corrects it to their own, must get the password box back.
+   */
+  function setPasswordVisible(visible) {
+    /*
+     * ⚠️ Hide the password FIELD, never its .form-group — the organization SSO slot lives inside
+     * that same group, so hiding the container took the single sign-on button down with it and left
+     * a login page whose only action was "Create Account". Found by looking at a screenshot.
+     */
+    const show = visible ? '' : 'none';
+    for (const id of ['loginPassword', 'loginPasswordLabel', 'loginBtn']) {
+      const el = document.getElementById(id);
+      if (el) el.style.display = show;
+    }
+    /*
+     * The instance's own providers go too. They are the operator's, not this organization's, and
+     * they are not domain-confined — so offering "Continue with Google" to someone whose company
+     * requires its own identity provider is offering them the bypass. The server refuses it either
+     * way; this stops the page inviting it.
+     */
+    const instance = document.getElementById('instanceProviders');
+    if (instance) instance.style.display = show;
+    /*
+     * "Create Account" goes too. Registration at an SSO-only domain is refused by the server, and
+     * leaving the button was worse than useless: it was the ONLY action left on the card, so the
+     * page invited the one thing that cannot work.
+     */
+    const reg = document.getElementById('showRegisterBtn');
+    if (reg) reg.style.display = show;
+    // The OR divider sits outside #instanceProviders, so hiding those alone left a dangling rule
+    // with nothing beneath it.
+    const divider = document.getElementById('ssoDivider');
+    if (divider) divider.style.display = show;
+    // "Forgot your password?" sits in its own <p>; hide the wrapper so no empty gap is left.
+    const forgot = document.getElementById('forgotLink');
+    if (forgot) {
+      const wrap = forgot.parentElement && forgot.parentElement.tagName === 'P' ? forgot.parentElement : forgot;
+      wrap.style.display = show;
+    }
   }
 
-  // Microsoft Sign-In
-  if (config.microsoftEnabled) {
-    document.getElementById('microsoftSignInBtn')?.addEventListener('click', async () => {
-      try {
-        const msalConfig = {
-          auth: {
-            clientId: config.microsoftClientId,
-            authority: `https://login.microsoftonline.com/${config.microsoftTenantId}`,
-            redirectUri: window.location.origin
-          }
-        };
-        const msalInstance = new msal.PublicClientApplication(msalConfig);
-        await msalInstance.initialize();
-        const loginResponse = await msalInstance.loginPopup({ scopes: ['User.Read'] });
-        if (loginResponse.accessToken) {
-          const res = await fetch('/api/auth/microsoft', {
+  async function lookupOrgSso(email) {
+    const at = String(email || '').lastIndexOf('@');
+    const domain = at === -1 ? '' : email.slice(at + 1).trim().toLowerCase();
+    const slot = orgSlot();
+    if (!slot) return;
+    // Nothing to ask about until there is a domain with a dot in it.
+    if (!domain || !domain.includes('.')) {
+      slot.style.display = 'none'; slot.innerHTML = ''; lastDomainAsked = ''; setPasswordVisible(true); return;
+    }
+    if (domain === lastDomainAsked) return;
+    try {
+      const res = await fetch(`/api/auth/sso/discover?email=${encodeURIComponent(email)}`);
+      /*
+       * ⚠️ Check the STATUS, not just that a body parsed.
+       *
+       * The comment below has always said a tripped rate limit must not poison the domain — and it
+       * did anyway, because a 429 body is perfectly valid JSON: res.json() resolved, `data.sso`
+       * came back undefined, so the single sign-on button was hidden, the password box restored,
+       * and `lastDomainAsked` recorded — permanently, for the life of the page. On an SSO-only
+       * domain that is the worst possible outcome: the password box the user is then offered gets
+       * 403, and the button they are told to use is not on the screen. Discover is 10/min per IP,
+       * so a handful of colleagues behind one office address is enough to trigger it.
+       */
+      if (!res.ok) throw new Error(`discover ${res.status}`);
+      const data = await res.json();
+      // Remembered only after a SUCCESSFUL answer.
+      lastDomainAsked = domain;
+      if (!data.sso) { slot.style.display = 'none'; slot.innerHTML = ''; setPasswordVisible(true); return; }
+      /*
+       * When the organization REQUIRES its identity provider, the password box is not merely going
+       * to fail — it is the wrong thing to offer. Showing it invites someone to type a password,
+       * be refused, and go and reset a password that will never work again. Hidden, not disabled,
+       * so there is one obvious way forward.
+       */
+      setPasswordVisible(!data.required);
+      /*
+       * A FORM, not a link, and a deliberately generic label.
+       *
+       * The lookup tells us only that this domain uses SSO — never which provider or whose it is,
+       * because that would identify a customer to anyone who guessed a domain. The server does the
+       * mapping again on submit, so the slug is never published to the page. POST keeps the address
+       * out of the URL, browser history and any Referer the provider's page would send.
+       */
+      /*
+       * A BUTTON that fetches and then navigates — not a form that submits.
+       *
+       * The dashboard's CSP is `form-action 'self'`, and Chrome applies it across the whole
+       * redirect chain, so a form POST that 302s on to the customer's identity provider was
+       * ABORTED with nothing shown to the user at all. The provider origins cannot be allowlisted
+       * because customers supply them. A script-initiated navigation is not covered by
+       * form-action, so the page asks the server where to go and goes there.
+       *
+       * Styled secondary: "Sign In" is the primary action while a password still works, and two
+       * identical blue buttons stacked one above the other sent people to their IdP by muscle
+       * memory after typing a password.
+       */
+      slot.innerHTML = `
+        <button type="button" id="orgSsoBtn" class="btn ${data.required ? 'btn-primary' : 'btn-secondary'}"
+                style="width:100%;justify-content:center;padding:10px">
+          ${t('auth.signin_sso')}
+        </button>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:6px;text-align:center">
+          ${t('auth.sso_org_hint')}
+        </div>`;
+      slot.style.display = '';
+
+      const btn = slot.querySelector('#orgSsoBtn');
+      if (btn) btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        try {
+          const r = await fetch('/api/auth/sso/start', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ access_token: loginResponse.accessToken })
+            headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify({ email }),
           });
-          const data = await res.json();
-          if (res.ok) onAuthSuccess(data);
-          else showError(data.error);
+          const body = await r.json().catch(() => ({}));
+          if (!r.ok || !body.start_url) throw new Error(body.error || `start ${r.status}`);
+          window.location.assign(body.start_url);
+        } catch {
+          btn.disabled = false;
+          showError(t('auth.sso_err_provider_unavailable'));
         }
-      } catch (err) {
-        showError(t('auth.error_microsoft_failed'));
+      });
+    } catch {
+      // A failed lookup must never block a password login — the form still works, and the password
+      // box comes back rather than leaving someone staring at a form with no way to submit it.
+      slot.style.display = 'none';
+      slot.innerHTML = '';
+      setPasswordVisible(true);
+    }
+  }
+
+  document.getElementById('loginEmail')?.addEventListener('input', (e) => {
+    clearTimeout(ssoLookupTimer);
+    const value = e.target.value;
+    ssoLookupTimer = setTimeout(() => lookupOrgSso(value), 400);
+  });
+
+  /*
+   * Completing an SSO login.
+   *
+   * The callback no longer hands the session token back in the URL — that was a login-CSRF hole,
+   * because a crafted link could install an ATTACKER'S token and quietly sign the victim into their
+   * account. The server now leaves it in a one-shot httpOnly cookie and we exchange it here, which
+   * a link cannot forge.
+   *
+   * Wrapped in an async IIFE because setupHandlers() is not async; `await` at this level is a
+   * SyntaxError that takes the whole module graph down with it, since app.js imports this file
+   * statically and there is no bundler to catch it first.
+   */
+  const ssoParams = new URLSearchParams((window.location.hash.split('?')[1] || ''));
+  const ssoReturning = ssoParams.get('sso') === '1';
+  const ssoError = ssoParams.get('sso_error');
+
+  if (ssoReturning || ssoError) {
+    // Keep any real query string; only the hash carried the SSO markers.
+    history.replaceState(null, '', window.location.pathname + window.location.search + '#/login');
+  }
+
+  if (ssoReturning) {
+    (async () => {
+      try {
+        const res = await fetch('/api/auth/sso/claim', { method: 'POST' });
+        if (!res.ok) throw new Error('claim rejected');
+        const data = await res.json();
+        onAuthSuccess(data);
+      } catch {
+        showToast(t('auth.sso_failed'), 'error');
       }
-    });
+    })();
+  } else if (ssoError) {
+    // Every code the callback can emit has a message; an unknown one still says something true
+    // rather than failing silently, which is how the previous implementation behaved on every click.
+    const known = ['expired', 'bad_state', 'no_code', 'no_email', 'email_unverified',
+      'verification_failed', 'provider_refused', 'provider_unavailable', 'unknown_provider',
+      'registration_disabled', 'account_exists_local', 'subject_mismatch', 'server_error',
+      'domain_not_allowed', 'account_exists_other_provider', 'sso_required'];
+    const key = known.includes(ssoError) ? `auth.sso_err_${ssoError}` : 'auth.sso_failed';
+    showToast(t(key), 'error');
   }
 }
 

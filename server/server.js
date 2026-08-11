@@ -1,3 +1,14 @@
+/*
+ * FIRST, before any dependency is required: make sure they are installed and loadable.
+ *
+ * A rollback restores an older package.json but not its packages, and a Node upgrade leaves the
+ * native database module compiled against the wrong ABI. Both present as a server that will not
+ * start, with an error naming a file rather than the action needed — and the rollback case happens
+ * precisely when something else has already gone wrong. Repairing takes seconds; diagnosing at 2am
+ * does not. ST_SKIP_DEP_PREFLIGHT=1 turns it off.
+ */
+require('./lib/preflight-deps').preflight();
+
 const express = require('express');
 const http = require('http');
 const https = require('https');
@@ -173,6 +184,29 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), strip
 // 12mb so AI-designed signs with embedded generated images (base64 data URLs)
 // can be published. #41 follow-up: upload generated images to the content store
 // and reference by URL instead of embedding, to keep widget configs small.
+/*
+ * Collapse duplicate slashes in the PATH before anything routes on it.
+ *
+ * Express normalises the mount boundary for a router, so `/api/auth//login` still reaches the login
+ * handler — but `app.use('/api/auth/login', rateLimit(...))` does NOT match it, so the limiter
+ * never runs. One extra slash therefore removed EVERY per-endpoint limit under /api/auth: unlimited
+ * password guesses (a review got a real session after 60 unthrottled attempts), unlimited TOTP
+ * codes, unlimited password-reset mail to any address, and the SSO discovery cap that exists to
+ * stop customer enumeration. It also made the per-account lockout a denial-of-service tool.
+ *
+ * Fixing it inside the limiter's key is not enough — the middleware is never invoked. The path has
+ * to be one canonical thing before routing, which is what this does. Query and body are untouched.
+ */
+app.use((req, res, next) => {
+  const q = req.url.indexOf('?');
+  const path = q === -1 ? req.url : req.url.slice(0, q);
+  if (path.includes('//')) {
+    const collapsed = path.replace(/\/{2,}/g, '/');
+    req.url = q === -1 ? collapsed : collapsed + req.url.slice(q);
+  }
+  next();
+});
+
 app.use(express.json({ limit: '12mb' }));
 const { sanitizeBody } = require('./middleware/sanitize');
 app.use(sanitizeBody);
@@ -522,6 +556,52 @@ app.use('/socket.io-client', express.static(
 // safe because the callback runs at request time, which is a subtle thing to depend on.
 const limiterTelemetry = require('./lib/limiter-telemetry');
 const rateLimits = new Map();
+/*
+ * The bucket key is the SHAPE of the endpoint, never the spelling the caller chose.
+ *
+ * Two failures drove this. Express routes non-strictly, so `/api/auth/login/` was a different key
+ * and bought a fresh ten password attempts. And `/api/organizations/<id>/...` carries three
+ * caller-chosen segments, so every request minted its own bucket — 120 calls with unique ids gave
+ * zero 429s against the limit that exists to bound outbound OIDC discovery and live DNS lookups.
+ *
+ * ⚠️ Fold by EXPLICIT shape, not with a clever catch-all. A single regex that collapsed "anything
+ * else" put every unknown path in one bucket WITH the real endpoints, so flooding nonsense URLs
+ * exhausted the limit for `/sso-only` — trading a bypass for a denial of service. Known shapes get
+ * their own keys; everything else shares one, separate from all of them.
+ */
+const LIMIT_PATH_SHAPES = [
+  [/^\/api\/auth\/oidc\/[^/]+\/(start|callback)$/, (m) => `/api/auth/oidc/:slug/${m[1]}`],
+  [/^\/api\/organizations\/sso-only\/removal-requests\/[^/]+\/[^/]+$/, () => '/api/organizations/sso-only/removal-requests/:id/:decision'],
+  [/^\/api\/organizations\/sso-only\/removal-requests$/, () => '/api/organizations/sso-only/removal-requests'],
+  [/^\/api\/organizations\/[^/]+\/sso-only\/removal-request\/[^/]+$/, () => '/api/organizations/:id/sso-only/removal-request/:id'],
+  [/^\/api\/organizations\/[^/]+\/sso-only\/removal-request$/, () => '/api/organizations/:id/sso-only/removal-request'],
+  [/^\/api\/organizations\/[^/]+\/sso-only$/, () => '/api/organizations/:id/sso-only'],
+  // The reset/target routes mint a bucket per TARGET without this, which is the same
+  // caller-chosen-segment defect, at the mount next door.
+  [/^\/api\/auth\/users\/[^/]+\/(.+)$/, (m) => `/api/auth/users/:id/${m[1]}`],
+  [/^\/api\/content\/[^/]+$/, () => '/api/content/:id'],
+  [/^\/api\/organizations\/[^/]+\/sso\/[^/]+\/domains\/[^/]+\/verify$/, () => '/api/organizations/:id/sso/:id/domains/:domain/verify'],
+  [/^\/api\/organizations\/[^/]+\/sso\/[^/]+\/test$/, () => '/api/organizations/:id/sso/:id/test'],
+  [/^\/api\/organizations\/[^/]+\/sso\/[^/]+$/, () => '/api/organizations/:id/sso/:id'],
+  [/^\/api\/organizations\/[^/]+\/sso$/, () => '/api/organizations/:id/sso'],
+];
+
+function canonicalLimitPath(rawPath) {
+  const p = rawPath
+    .replace(/\/{2,}/g, '/')      // collapse doubled separators
+    .replace(/\/+$/, '')          // a trailing slash is the same endpoint
+    .toLowerCase()
+    || '/';
+  for (const [re, to] of LIMIT_PATH_SHAPES) {
+    const m = p.match(re);
+    if (m) return to(m);
+  }
+  // Unrecognised, but still under a mount whose ids are caller-chosen: one shared bucket, kept
+  // apart from every real endpoint so flooding it cannot starve them.
+  if (p.startsWith('/api/organizations/')) return '/api/organizations/:unmatched';
+  return p;
+}
+
 function rateLimit(windowMs, maxRequests) {
   return (req, res, next) => {
     // #100: key on the FULL path, not req.path. These limiters are mounted via
@@ -529,7 +609,18 @@ function rateLimit(windowMs, maxRequests) {
     // req.path was '/' for ALL of them - i.e. /login, /register, /totp/verify shared
     // ONE per-IP counter (coupled limits; the /totp/verify brute-force limit wasn't
     // actually independent). originalUrl keeps each endpoint's limit separate.
-    const key = getClientIp(req) + (req.originalUrl || req.url || req.path).split('?')[0];
+    /*
+     * ⚠️ NORMALISE THE PATH, or the key is caller-controlled and the limit is decorative.
+     *
+     * Express routes non-strictly, so `/api/auth/login/` reaches the same handler as
+     * `/api/auth/login` — with a different originalUrl, hence a different bucket, hence a fresh ten
+     * attempts. A review walked straight past the login limiter that way. Any path segment the
+     * caller chooses does the same thing, and `/api/auth/oidc/:slug/...` has one by design, so the
+     * slug is folded out too: one bucket per IP per ENDPOINT, not per spelling of it.
+     */
+    const rawPath = (req.originalUrl || req.url || req.path).split('?')[0];
+    const normalisedPath = canonicalLimitPath(rawPath);
+    const key = getClientIp(req) + normalisedPath;
     const now = Date.now();
     const windowStart = now - windowMs;
     let hits = rateLimits.get(key) || [];
@@ -573,6 +664,15 @@ app.use('/api/auth/register', rateLimit(60000, 5)); // 5 registrations per minut
 app.use('/api/auth/totp/verify', rateLimit(60000, 10));
 // Email-verification resend: cap so it can't be used to spray mail at an address.
 app.use('/api/auth/resend-verification', rateLimit(60000, 5));
+// Domain lookup is unauthenticated by necessity (it runs before login). Rate limited so it
+// cannot be walked to enumerate which customers use SSO.
+app.use('/api/auth/sso/discover', rateLimit(60000, 10));
+// 10/min was wrong for this one: org SSO is used by companies behind a SINGLE corporate egress IP,
+// and this is their only entry point, so the 11th employee of the morning met a raw JSON 429 with no
+// login page. It is a redirect, not a credential check.
+app.use('/api/auth/sso/start', rateLimit(60000, 120));
+// The OIDC endpoints had no limit at all, which left the callback's parsing as a free amplifier.
+app.use('/api/auth/oidc', rateLimit(60000, 120));
 // Self-service password reset. The request endpoint is the spray surface (it sends mail to
 // an address the caller supplies), so it gets the tighter cap; the redeem endpoint is a
 // 32-byte-token guess, capped mostly to keep the bcrypt work bounded.
@@ -583,6 +683,14 @@ app.use('/api/auth/reset-password', rateLimit(60000, 10));
 // path prefix first, so this fires before /api/auth catches the request.
 app.use('/api/auth/users', rateLimit(60000, 20));
 app.use('/api/auth', require('./routes/auth'));
+// Per-organization SSO configuration. Mounted under /api/organizations so the org id is the
+// route's own subject, which is what the org_owner/org_admin check keys on.
+/*
+ * Rate-limited because these routes do outbound work on caller-supplied input: OIDC discovery on a
+ * customer-chosen issuer, and a live DNS lookup per domain verification. Everything under
+ * /api/auth/* already had a limit; this router was mounted without one.
+ */
+app.use('/api/organizations', rateLimit(60000, 60), require('./routes/org-sso'));
 // Rate limit pairing to prevent brute force (5 attempts per minute per IP).
 // #88: bind this to the whole /api/provision surface, not just /pair - the bare
 // POST /api/provision (routes/provisioning.js) is a second pairing endpoint that

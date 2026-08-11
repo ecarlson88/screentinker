@@ -84,11 +84,14 @@ module.exports = {
     return secret;
   })(),
   jwtExpiry: '7d',
-  // Google OAuth - set these in env or here
-  googleClientId: process.env.GOOGLE_CLIENT_ID || '',
-  // Microsoft OAuth - set these in env or here
-  microsoftClientId: process.env.MICROSOFT_CLIENT_ID || '',
-  microsoftTenantId: process.env.MICROSOFT_TENANT_ID || 'common',
+  /*
+   * Google and Microsoft sign-in are configured through lib/oidc-providers.js, which reads
+   * process.env directly — there is nothing here for it to read, so these fields were dead, and
+   * `microsoftTenantId` defaulting to 'common' actively contradicted the provider code, which now
+   * REFUSES 'common' (it advertises a template issuer that can never match, and accepting it means
+   * accepting tokens from every Azure tenant — nOAuth). Removed rather than left as a trap for the
+   * next person who greps for where Microsoft SSO is configured.
+   */
   // Stripe (optional - for paid subscriptions)
   stripeSecretKey: process.env.STRIPE_SECRET_KEY || '',
   stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET || '',

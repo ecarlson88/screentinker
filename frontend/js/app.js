@@ -248,7 +248,7 @@ async function refreshCurrentUser() {
     // a redirect loop.
     const hash = window.location.hash || '#/';
     if (hasNoAccessibleWorkspace(fresh)
-        && hash !== '#/no-workspace' && hash !== '#/login' && hash !== '#/change-password') {
+        && hash !== '#/no-workspace' && !hash.startsWith('#/login') && hash !== '#/change-password') {
       window.location.hash = '#/no-workspace';
     }
   } catch {}
@@ -338,14 +338,29 @@ function route() {
   // do nothing. The login view reads the token off the hash and shows the new-password form.
   const isResetRoute = hash.startsWith('#/reset-password');
 
+  /*
+   * ⚠️ The SAME rule the comment above states, for the login route.
+   *
+   * The server finishes every single sign-on by redirecting to `#/login?sso=1` (claim the session)
+   * or `#/login?sso_error=<code>` (say what went wrong). Matching the hash EXACTLY meant neither
+   * survived: an unauthenticated browser — the only kind that arrives here — had the hash rewritten
+   * to a bare `#/login` and the query was gone before the login view ever ran. So a user who
+   * authenticated perfectly at their identity provider landed back on a clean login page, still
+   * signed out, with no message; and all sixteen error codes rendered SILENCE, which is worse than
+   * a wrong message because there is nothing to report or search for.
+   *
+   * It took the pre-existing `?verified=1` email-verification toast with it.
+   */
+  const isLoginRoute = hash === '#/login' || hash.startsWith('#/login?');
+
   // Auth check - redirect to login if not authenticated
-  if (!isAuthenticated() && hash !== '#/login' && !isResetRoute) {
+  if (!isAuthenticated() && !isLoginRoute && !isResetRoute) {
     window.location.hash = '#/login';
     return;
   }
 
   // If authenticated and on login page, redirect to dashboard or onboarding
-  if (isAuthenticated() && (hash === '#/login' || isResetRoute)) {
+  if (isAuthenticated() && (isLoginRoute || isResetRoute)) {
     window.location.hash = localStorage.getItem('rd_onboarded') ? '#/' : '#/onboarding';
     return;
   }
@@ -422,8 +437,10 @@ function route() {
     return;
   }
 
-  // Login page (and password-reset links from email) - hide sidebar
-  if (hash === '#/login' || isResetRoute) {
+  // Login page (and password-reset links from email) - hide sidebar.
+  // Matches `#/login?...` too: the single sign-on return carries `?sso=1` / `?sso_error=<code>`,
+  // and an exact comparison meant the login view was never rendered for either.
+  if (isLoginRoute || isResetRoute) {
     sidebar.style.display = 'none';
     app.style.marginLeft = '0';
     const mb = document.getElementById('mobileMenuBtn');

@@ -79,6 +79,15 @@ export async function render(container) {
       </div>
     </div>
 
+    <!-- Single sign-on removal approvals. First, because it is the only screen on this page an
+         operator is DIRECTED to by an email, and because a tenant is locked out of their own
+         product while it sits here. -->
+    <div class="settings-section" id="ssoOnlySection" style="display:none">
+      <h3>${t('admin.sso_only.title')}</h3>
+      <p style="color:var(--text-muted);font-size:12px;margin-bottom:12px">${t('admin.sso_only.desc')}</p>
+      <div id="ssoOnlyRequests"><p style="color:var(--text-muted)">${t('common.loading')}</p></div>
+    </div>
+
     <div class="settings-section">
       <h3>${t('admin.all_users')}</h3>
       <div id="allUsersTable"><p style="color:var(--text-muted)">${t('common.loading')}</p></div>
@@ -137,6 +146,7 @@ export async function render(container) {
 
   loadUsers();
   loadOrgs();
+  loadSsoOnlyRequests();
   loadBranding();
   loadPlans();
   loadSystem();
@@ -146,6 +156,70 @@ export async function render(container) {
 
 // #36: list organizations with owner + resource counts; platform admin can
 // cascade-delete an org or an individual workspace (type-the-name confirm).
+/*
+ * Pending "stop requiring single sign-on" requests.
+ *
+ * The notification email tells the operator to review this under Admin, and for a while it did not
+ * exist — the only way to approve was curl, while the customer sat locked out. The section hides
+ * itself when there is nothing pending so it is never noise.
+ */
+async function loadSsoOnlyRequests() {
+  const section = document.getElementById('ssoOnlySection');
+  const host = document.getElementById('ssoOnlyRequests');
+  if (!section || !host) return;
+  // NB: `api` is a map of named methods, not a generic client — there is no api.get(), and calling
+  // one silently hid this whole section behind the catch below.
+  const authed = (path, init = {}) => fetch(`/api${path}`, {
+    ...init,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}`, ...(init.headers || {}) },
+  });
+
+  let requests = [];
+  try {
+    const res = await authed('/organizations/sso-only/removal-requests');
+    if (!res.ok) throw new Error(String(res.status));
+    requests = (await res.json()).requests || [];
+  } catch {
+    section.style.display = 'none';
+    return;
+  }
+  // Clear as well as hide: leaving the last decided request in the tree kept its live
+  // Approve/Reject listeners attached to a request that no longer exists.
+  if (!requests.length) { host.innerHTML = ''; section.style.display = 'none'; return; }
+  section.style.display = '';
+
+  host.innerHTML = requests.map((r) => `
+    <div style="border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin-bottom:8px">
+      <div><strong>${esc(r.organization_name || r.organization_id)}</strong></div>
+      <div style="font-size:12px;color:var(--text-muted);margin-top:2px">
+        ${esc(t('admin.sso_only.requested_by', { who: r.requested_by_email || 'unknown' }))}
+      </div>
+      ${r.reason ? `<div style="font-size:12px;margin-top:6px">${esc(r.reason)}</div>` : ''}
+      <div style="font-size:12px;color:var(--warning,#b45309);margin-top:8px">${esc(t('admin.sso_only.effect'))}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px">
+        <button class="btn btn-danger btn-sm" data-sso-approve="${esc(r.id)}">${esc(t('admin.sso_only.approve'))}</button>
+        <button class="btn btn-secondary btn-sm" data-sso-reject="${esc(r.id)}">${esc(t('admin.sso_only.reject'))}</button>
+      </div>
+    </div>`).join('');
+
+  const decide = async (id, decision) => {
+    try {
+      const res = await authed(`/organizations/sso-only/removal-requests/${id}/${decision}`, { method: 'POST', body: '{}' });
+      if (!res.ok) throw new Error(((await res.json().catch(() => ({}))).error) || String(res.status));
+      showToast(t(decision === 'approve' ? 'admin.sso_only.approved' : 'admin.sso_only.rejected'), 'success');
+      await loadSsoOnlyRequests();
+    } catch (e) {
+      showToast((e && e.message) || t('admin.sso_only.failed'), 'error');
+    }
+  };
+  // Approving RE-OPENS password sign-in for a whole organization, so it is confirmed; rejecting
+  // only leaves the safe state in place and is not.
+  host.querySelectorAll('[data-sso-approve]').forEach((b) => b.addEventListener('click', () => {
+    if (window.confirm(t('admin.sso_only.confirm'))) decide(b.dataset.ssoApprove, 'approve');
+  }));
+  host.querySelectorAll('[data-sso-reject]').forEach((b) => b.addEventListener('click', () => decide(b.dataset.ssoReject, 'reject')));
+}
+
 async function loadOrgs() {
   const el = document.getElementById('orgsTable');
   if (!el) return;
@@ -276,11 +350,17 @@ async function loadUsers() {
         <tbody>
           ${users.map(u => `
             <tr style="border-bottom:1px solid var(--border)">
-              <td style="padding:8px"><div style="font-weight:500">${u.name || u.email}</div><div style="font-size:11px;color:var(--text-muted)">${u.email}</div></td>
-              <td style="padding:8px"><span style="background:var(--bg-primary);padding:2px 8px;border-radius:10px;font-size:11px">${u.auth_provider}</span></td>
+              <!-- ESCAPED: these come from self-registration and from an identity provider's
+                   email claim, so they are attacker-chosen. A reviewer registered an address whose
+                   local part was an img tag with an onerror handler, anonymously, and got script
+                   execution in the PLATFORM ADMIN's session on this page - the very page operators
+                   are now emailed to. Note backticks are illegal here: this sits inside a template
+                   literal. -->
+              <td style="padding:8px"><div style="font-weight:500">${esc(u.name || u.email)}</div><div style="font-size:11px;color:var(--text-muted)">${esc(u.email)}</div></td>
+              <td style="padding:8px"><span style="background:var(--bg-primary);padding:2px 8px;border-radius:10px;font-size:11px">${esc(u.auth_provider)}</span></td>
               <td style="padding:8px;font-size:11px;color:var(--text-muted)">${u.last_login ? new Date(u.last_login * 1000).toLocaleString() : t('common.never')}</td>
               <td style="padding:8px">
-                <select class="input" style="max-width:120px;width:100%;background:var(--bg-input);font-size:12px;padding:4px" data-role-user="${u.id}">
+                <select class="input" style="max-width:120px;width:100%;background:var(--bg-input);font-size:12px;padding:4px" data-role-user="${esc(u.id)}">
                   ${PLATFORM_ROLE_OPTIONS.map(r => `<option value="${r}" ${u.role === r ? 'selected' : ''}>${t('admin.role.' + r)}</option>`).join('')}
                 </select>
               </td>
@@ -291,7 +371,7 @@ async function loadUsers() {
               </td>
               ${workspaceCell(u)}
               <td style="padding:8px;white-space:nowrap">
-                ${u.auth_provider === 'local' && u.id !== currentUser.id ? `<button class="btn btn-secondary btn-sm" data-reset-pw-user="${u.id}" data-user-email="${u.email}" style="margin-right:4px">${t('admin.reset_password')}</button>` : ''}
+                ${u.auth_provider === 'local' && u.id !== currentUser.id ? `<button class="btn btn-secondary btn-sm" data-reset-pw-user="${esc(u.id)}" data-user-email="${esc(u.email)}" style="margin-right:4px">${t('admin.reset_password')}</button>` : ''}
                 ${!isPlatformAdmin(u) ? `<button class="btn btn-danger btn-sm" data-delete-user="${u.id}">${t('admin.remove')}</button>` : `<span style="color:var(--text-muted);font-size:11px">${t('admin.owner')}</span>`}
               </td>
             </tr>

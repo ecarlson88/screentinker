@@ -14,7 +14,9 @@ const { sendEmail } = require('../services/email');
 const NAME_MAX = 80;
 const SLUG_MAX = 60;
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Markup characters are not legal here. The looser form admitted < > " ' and an admin-
+// chosen email became stored XSS in the platform admin's user list.
+const EMAIL_RE = /^[^\s@<>"'`\\;,()\[\]]+@[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$/;
 const WORKSPACE_ROLES = ['workspace_admin', 'workspace_editor', 'workspace_viewer'];
 
 // Operational policy - env-configurable with conservative defaults. Restart

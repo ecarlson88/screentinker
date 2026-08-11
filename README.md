@@ -318,31 +318,223 @@ advertising it — put the account on the hidden plan and it simply gets those l
 above deliberately lists hidden plans too (marked as such), because the previous behaviour was that
 a hidden plan was invisible to the operator as well as the customer.
 
-#### Google OAuth
+#### Single sign-on (OpenID Connect)
 
-Let users sign in with Google.
+Any OIDC provider works — Google, Microsoft/Entra, Okta, Auth0, Keycloak, Authentik, Zitadel — through
+one flow: **Authorization Code with PKCE, run server-side**. The browser never talks to the provider
+directly, so there is no SDK to load and no third-party script origin to allow in the CSP.
 
-1. Create a project in [Google Cloud Console](https://console.cloud.google.com)
-2. Enable the Google Identity API
-3. Create OAuth 2.0 credentials (web application)
-4. Add `https://yourdomain.com` as an authorized origin
+Every login is verified as an **ID token**: signature against the provider's published JWKS,
+`iss` exactly as discovered, `aud` (and `azp`) matching your client, `exp`, and a `nonce` this server
+generated for that specific login. An access token is never accepted as proof of identity.
+
+Set the redirect URI at your provider to:
+
+```
+https://yourdomain.com/api/auth/oidc/<slug>/callback
+```
+
+Set `APP_URL` so that origin is pinned — the redirect URI must match your provider's registration
+exactly, and deriving it from the request `Host` would both break behind a second hostname and take
+its value from the caller.
+
+**Google** and **Microsoft** need only the variables this README has always documented; their issuer
+is filled in for you and their slugs are `google` and `microsoft`:
 
 | Variable | Description |
 |----------|-------------|
-| `GOOGLE_CLIENT_ID` | Your Google OAuth client ID |
+| `GOOGLE_CLIENT_ID` | OAuth 2.0 client ID from [Google Cloud Console](https://console.cloud.google.com) |
+| `MICROSOFT_CLIENT_ID` | Application (client) ID from the [Azure portal](https://portal.azure.com) |
+| `MICROSOFT_TENANT_ID` | **Your tenant GUID — required.** `common`/`organizations` are refused |
 
-#### Microsoft OAuth
+⚠️ **Multi-tenant Microsoft (`common`) is deliberately refused, and Microsoft sign-in stays disabled
+until you set a tenant GUID.** Two reasons that point the same way. It cannot work: Microsoft's
+multi-tenant metadata advertises the literal template `https://login.microsoftonline.com/{tenantid}/v2.0`,
+so the issuer never matches and every login fails anyway. And the obvious fix is dangerous — accepting
+that template means accepting tokens from *every* Azure tenant, which is
+[nOAuth](https://www.descope.com/blog/post/noauth): any tenant admin can set an arbitrary, unverified
+`email` on one of their own users and be issued a session as that address. Safe multi-tenant support
+needs per-tenant pinning (validate `tid` against an allowlist, key accounts on `oid`+`tid` rather than
+email) and is not implemented.
 
-Let users sign in with Microsoft/Azure AD.
+**Any other provider** is added by slug:
 
-1. Register an app in [Azure Portal](https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps)
-2. Add a web redirect URI: `https://yourdomain.com`
-3. Note the Application (client) ID
+```bash
+OIDC_PROVIDERS=okta,authentik
+OIDC_OKTA_ISSUER=https://example.okta.com
+OIDC_OKTA_CLIENT_ID=0oa...
+OIDC_OKTA_NAME=Okta                      # optional button label
+OIDC_OKTA_CLIENT_SECRET=...              # optional — PKCE means a public client works
+OIDC_OKTA_SCOPES=openid email profile    # optional
+```
 
-| Variable | Description |
-|----------|-------------|
-| `MICROSOFT_CLIENT_ID` | Your Azure AD application client ID |
-| `MICROSOFT_TENANT_ID` | Tenant ID (`common` for multi-tenant) |
+The issuer is the base URL whose `/.well-known/openid-configuration` describes the provider; endpoints
+and keys are discovered from it and cached.
+
+**Account rules.** A provider must assert a verified email, because the whole account model keys on
+it. An SSO login never takes over an existing account that has a password — the owner signs in
+locally and links from Settings. If the provider's stable subject (`sub`) changes for an address, the
+login is refused rather than handing an account to a recycled mailbox.
+
+An account established by one provider is **not** adopted by another. A per-organization provider may
+only claim an account that its own organization established, or a `local` account that has never set
+a password (an invited user signing in for the first time); anything else is refused with
+`account_exists_other_provider`. The earlier rule — "any account without a password may be re-pointed
+at whichever provider spoke last" — was safe only while the operator chose every provider, and became
+an account-takeover primitive the moment customers could add their own.
+
+⚠️ **TOTP is not prompted on an SSO login.** Second-factor is the identity provider's job in this
+flow, matching the long-standing behaviour of the SSO and API-token paths.
+
+#### Per-organization SSO (customer-configured)
+
+The providers above are **instance-wide** — they belong to whoever runs the server and appear as
+buttons on the login page for everyone.
+
+An organization can also bring **its own** identity provider, configured by an org owner or admin in
+**Settings → Single sign-on**. No environment variable or restart is involved.
+
+A per-org provider is **never listed publicly**. It appears only when someone types an email address
+at one of that organization's **verified** domains, at which point the login page offers a generic
+"Continue with single sign-on" button. The domain lookup answers only whether that domain uses SSO
+and whether it is required — never a provider name or slug — so a guessed domain cannot confirm who
+a customer is, and the mapping back to a provider happens server-side on submit. Both endpoints are
+rate limited.
+
+**Instance-wide is the default; an organization overrides only its own verified domains.** Type an
+address whose domain no organization has verified and you get the local password form plus every
+instance provider you configured. Type one that an organization has verified and its own button is
+added — and if that organization requires SSO, it becomes the only option.
+
+Each provider gets a randomly generated redirect URI, shown in Settings, which the admin registers
+with their identity provider:
+
+```
+https://yourdomain.com/api/auth/oidc/<generated-slug>/callback
+```
+
+The slug is generated rather than chosen so two customers cannot collide on — or guess — each
+other's. A domain may be claimed by only one organization; a second claim is refused.
+
+⚠️ **A provider may only authenticate emails inside the domains it has VERIFIED.** An organization
+supplies its own issuer and client ID, so it controls that identity provider completely and could
+otherwise assert any address at all — including another company's, or an administrator's. Confining
+assertions to verified domains is what makes customer-configurable SSO safe to offer.
+
+⚠️ **Public email providers cannot be claimed.** `gmail.com`, `outlook.com`, `yahoo.com`, `icloud.com`
+and the rest of the consumer mailboxes are refused (`server/lib/public-email-domains.js`). Claiming
+one would offer every Gmail user a "sign in with your organization" button pointing at one tenant's
+infrastructure — phishing launched from this product's own login page — and would let one account
+deny a public domain to everyone else.
+
+##### Proving a domain
+
+A claimed domain **routes nobody and authenticates nobody until DNS proves the organization controls
+it.** Typing a domain into a form reserves the name and nothing more.
+
+Publish this record, then press **Verify**:
+
+```
+_screentinker-verify.example.com.  IN  TXT  "st-verify=<token>"
+```
+
+The token is unique per domain, so publishing one proof cannot be replayed to claim a second. A
+dedicated `_`-prefixed name is used rather than the apex, where a careless edit would sit alongside
+SPF and DMARC and break mail — and where a wildcard `*.example.com` could not be confused for a
+proof, since a wildcard answers with its own value and never with the token.
+
+TXT is the only accepted form. A CNAME alternative would have to point at a wildcard zone this
+project operates, answering for every token ever issued; documenting one without running it would
+describe a check that can never pass.
+
+⚠️ **The proof name itself must not be a CNAME.** A TXT lookup follows CNAMEs, and a wildcard
+`*.example.com` covers `_screentinker-verify.example.com` too — so a wildcard CNAME would let
+whoever controls its target prove the domain, turning an ordinary subdomain takeover into control of
+every `@example.com` login. A delegated proof name is refused, which is stricter than ACME's dns-01.
+
+**An unverified claim lapses after 8 hours, and lapsing RELEASES it.** Pressing Verify on an
+expired claim does not reissue it in place — that renewed the clock, so one request per window held
+a domain forever. The claim is released, the domain becomes free for anyone else, and re-adding it
+is a new claim: new token, and the operator is notified again. A verified domain never expires;
+re-proving on a timer would log a customer out over a DNS edit made months afterwards. Squatting is
+not made impossible — it is made loud.
+
+**Deleting a provider releases its domains and returns its accounts to local sign-in**, so the
+organization can re-claim its own domain and its people can recover by password reset. Both used to
+be stranded: a verified domain row outlived its provider and blocked that domain for everyone
+permanently, and its users could neither sign in nor reset.
+
+Platform admins are emailed whenever a domain is claimed. Verification is what makes an unowned
+claim worthless; the notification is what makes an attempt visible. Nothing is ever sent to the
+claimed domain itself — that would let any tenant make this product email third parties.
+
+⚠️ **Instance-wide providers are exempt from all of the above.** `GOOGLE_CLIENT_ID`, `OIDC_*` and
+friends are the operator's own configuration, are not domain-restricted, and require no verification.
+Domain proof exists because per-organization providers are supplied by CUSTOMERS.
+
+Signing in through an organization's provider makes the user a member of that organization
+(`org_member`). Existing members keep whatever role they already have — logging in never promotes or
+demotes anyone. Client secrets are optional (PKCE), and are stored AES-256-GCM encrypted and never
+returned by the API.
+
+##### Requiring single sign-on
+
+An organization can turn off password sign-in for its verified domains, so its identity provider is
+the only way in — which is the point of buying SSO: the IdP holds the MFA, the conditional access
+and the instant removal of access, and a password box beside it is a way around all three.
+
+Settings → Single sign-on → **Require single sign-on**. It needs at least one verified domain, so an
+organization cannot leave its own people with no way to sign in, and cannot switch off passwords for
+a domain it merely typed.
+
+When it is on:
+
+- the login page **hides** the password field for those domains rather than letting someone type a
+  password that is going to be refused and then send them to reset it;
+- `POST /api/auth/login` refuses with `403 sso_required` — distinguishable from a wrong password,
+  because the page must not tell a user to fix a credential that is not the problem;
+- **every other identity provider is refused too**, including the instance's own Google or
+  Microsoft. Those belong to the operator and are not domain-restricted, so leaving them available
+  would be a side door straight past the customer's MFA — blocking passwords while leaving
+  "Continue with Google" is not requiring single sign-on, it is renaming the bypass.
+
+**Turning it off is a request, not a switch.** That direction re-opens password sign-in, so it is
+the direction an attacker who has taken an org admin would take, and it is also what a customer will
+demand at their worst moment — identity provider down, nobody can work — which is exactly when a
+self-service toggle gets flipped without thinking. The org admin files a request; a **platform admin
+approves it**, and nothing changes until they do.
+
+The approval email deliberately carries **no action link**. A token that acts on its own would turn
+every forwarded, archived or auto-previewed copy of that message into a way to switch off a
+customer's single sign-on. The decision is made signed in, under Admin.
+
+⚠️ **`platform_admin` is exempt from enforcement, and that exemption is load-bearing.** The operator
+is who approves removal. If the operator's own address sat at an SSO-only domain and that identity
+provider broke, nobody could sign in to approve anything and the instance would be bricked with no
+way out. It is the break-glass — it applies to the people running the server, never to a customer's
+own admins.
+
+⚠️ **This makes the approval queue an availability dependency.** An organization whose IdP breaks is
+locked out until an operator acts. That is the intended trade — deliberate friction on the dangerous
+direction — but it should be a decision, not a surprise.
+
+#### Dependency preflight on boot
+
+Before anything else is loaded, the server checks that the packages this build declares are actually
+installed and that the native database module loads under the running Node. If either is wrong it
+repairs it (`npm install --omit=dev`, or `npm rebuild better-sqlite3`) and continues; if it cannot,
+it exits saying what to run rather than dying on a `MODULE_NOT_FOUND` naming a file.
+
+`scripts/upgrade.sh` already installs dependencies, so this is not for the normal path. It is for
+the ways a box ends up with the wrong `node_modules`:
+
+- **rolling back** to an older tag restores that tag's `package.json` but not its packages — and you
+  are rolling back because something is already wrong;
+- **upgrading Node** leaves `better-sqlite3` compiled against the previous ABI, which fails in a way
+  that reads like database corruption and is not.
+
+Set `ST_SKIP_DEP_PREFLIGHT=1` on an air-gapped host, or anywhere you manage `node_modules` yourself
+and do not want a boot reaching for the registry.
 
 #### Email (Microsoft Graph or SMTP)
 

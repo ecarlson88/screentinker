@@ -66,6 +66,35 @@ export async function render(container) {
       </div>
     </div>
 
+    <!-- Per-organization SSO. Hidden unless the signed-in user administers an organization: this
+         is the most security-relevant setting a tenant has, so it is not shown to members who
+         cannot change it. Instance-wide providers are the operator's business and are configured
+         by environment, not here. -->
+    <div class="settings-section" id="ssoCard" style="display:none">
+      <h3>${t('sso.title')}</h3>
+      <p style="color:var(--text-muted);font-size:12px;margin-bottom:8px">${t('sso.blurb')}</p>
+      <div id="ssoList"></div>
+      <details id="ssoAddDetails" style="margin-top:12px">
+        <summary style="cursor:pointer;font-size:13px">${t('sso.add')}</summary>
+        <div style="margin-top:12px;display:grid;gap:10px;max-width:560px">
+          <div class="form-group"><label>${t('sso.f_name')}</label>
+            <input type="text" id="ssoName" class="input" placeholder="Acme SSO"></div>
+          <div class="form-group"><label>${t('sso.f_issuer')}</label>
+            <input type="url" id="ssoIssuer" class="input" placeholder="https://login.example.com">
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px">${t('sso.f_issuer_hint')}</div></div>
+          <div class="form-group"><label>${t('sso.f_client_id')}</label>
+            <input type="text" id="ssoClientId" class="input"></div>
+          <div class="form-group"><label>${t('sso.f_client_secret')}</label>
+            <input type="password" id="ssoClientSecret" class="input" autocomplete="new-password">
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px">${t('sso.f_client_secret_hint')}</div></div>
+          <div class="form-group"><label>${t('sso.f_domains')}</label>
+            <input type="text" id="ssoDomains" class="input" placeholder="acme.com, acme.co.uk">
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px">${t('sso.f_domains_hint')}</div></div>
+          <div><button class="btn btn-primary btn-sm" id="ssoCreateBtn">${t('sso.create')}</button></div>
+        </div>
+      </details>
+    </div>
+
     <div class="settings-section">
       <h3>${t('apitoken.title')}</h3>
       <p style="color:var(--text-muted);font-size:12px;margin-bottom:8px">${t('apitoken.desc')}</p>
@@ -634,6 +663,388 @@ export async function render(container) {
     }
   });
 
+  /* ── Per-organization SSO ──────────────────────────────────────────────────────────────────
+   *
+   * Only an org owner/admin sees this. The server enforces the same rule (and answers 404, not
+   * 403, so an outsider learns nothing) — this just avoids showing a card the user cannot use.
+   */
+  const orgId = user.current_organization?.id;
+  const canManageSso = orgId && ['org_owner', 'org_admin'].includes(user.current_org_role);
+
+  async function loadSso() {
+    const card = document.getElementById('ssoCard');
+    if (!card || !canManageSso) return;
+    card.style.display = '';
+    const listEl = document.getElementById('ssoList');
+    let providers = [];
+    try {
+      const res = await fetch(`/api/organizations/${orgId}/sso`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+      });
+      if (!res.ok) throw new Error('load failed');
+      providers = (await res.json()).providers || [];
+    } catch {
+      listEl.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${esc(t('sso.load_failed'))}</p>`;
+      return;
+    }
+
+    if (!providers.length) {
+      listEl.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${esc(t('sso.none'))}</p>`;
+      return;
+    }
+
+    // Requiring SSO is a separate decision from having it, so it gets its own block rather than
+    // hiding inside a provider — an organization may have several providers and one answer.
+    let onlyState = null;
+    try {
+      const r = await fetch(`/api/organizations/${orgId}/sso-only`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+      });
+      if (r.ok) onlyState = await r.json();
+    } catch { /* the providers still render; the toggle simply does not appear */ }
+
+    const origin = `${window.location.protocol}//${window.location.host}`;
+    listEl.innerHTML = providers.map((p) => `
+      <div style="border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+          <div>
+            <strong>${esc(p.name)}</strong>
+            ${p.enabled ? '' : `<span style="font-size:11px;color:var(--text-muted)"> — ${esc(t('sso.disabled'))}</span>`}
+            <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${esc(p.issuer)}</div>
+            <div style="font-size:12px;color:var(--text-muted)">${esc(t('sso.domains_label'))}: ${esc(p.email_domains || '—')}</div>
+            ${((p.domains || []).some((d) => !d.verified) || (p.domains || []).length === 0)
+              ? `<div style="font-size:12px;color:var(--warning,#b45309);margin-top:2px">⚠️ ${esc(t('sso.unverified_warning'))}</div>`
+              : ''}
+          </div>
+          <!-- wrap, do not shrink-to-clip: at 375px this row ran to x=417 on a 375px viewport and
+               the page does not scroll horizontally, so "Remove" was simply unreachable. -->
+          <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+            <button class="btn btn-secondary btn-sm" data-sso-test="${esc(p.id)}">${esc(t('sso.test'))}</button>
+            <button class="btn btn-secondary btn-sm" data-sso-edit="${esc(p.id)}">${esc(t('sso.edit'))}</button>
+            <button class="btn btn-secondary btn-sm" data-sso-toggle="${esc(p.id)}" data-enabled="${p.enabled ? '1' : '0'}">
+              ${esc(p.enabled ? t('sso.disable') : t('sso.enable'))}
+            </button>
+            <button class="btn btn-danger btn-sm" data-sso-delete="${esc(p.id)}">${esc(t('sso.delete'))}</button>
+          </div>
+        </div>
+        <!-- The admin has to paste this into their identity provider, and it must match character
+             for character, so it is shown rather than described. -->
+        <div style="margin-top:8px;font-size:12px">
+          <div style="color:var(--text-muted)">${esc(t('sso.callback_label'))}</div>
+          <code style="display:block;word-break:break-all;padding:6px;background:var(--bg-secondary);border-radius:4px">${esc(origin + p.callback_url)}</code>
+        </div>
+
+        <!-- Editing is per provider, because an organization may have several (one per domain, or
+             one per identity provider after a merger) and they are configured independently. -->
+        <!-- Domain proof. A claimed domain routes NOBODY until DNS confirms the organization
+             controls it, so the state of each one is shown plainly rather than left to be inferred
+             from a login that silently does not work. -->
+        ${(p.domains || []).length ? `
+        <div style="margin-top:10px;font-size:12px">
+          <div style="color:var(--text-muted);margin-bottom:4px">${esc(t('sso.domains_heading'))}</div>
+          ${p.domains.map((d, di) => `
+            <div style="border:1px solid var(--border);border-radius:4px;padding:8px;margin-bottom:6px">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+                <div><strong>${esc(d.domain)}</strong>
+                  ${d.verified
+                    ? `<span style="color:var(--success,#15803d)"> — ${esc(t('sso.domain_verified'))}</span>`
+                    : `<span style="color:var(--warning,#b45309)"> — ${esc(t('sso.domain_pending'))}</span>`}
+                </div>
+                ${d.verified ? '' : `<button class="btn btn-secondary btn-sm" data-sso-verify="${esc(p.id)}" data-domain="${esc(d.domain)}" data-di="${di}">${esc(t('sso.verify_now'))}</button>`}
+              </div>
+              ${d.verified ? '' : `
+                <div style="margin-top:6px;color:var(--text-muted)">${esc(t('sso.dns_instructions'))}</div>
+                <code style="display:block;word-break:break-all;padding:6px;background:var(--bg-secondary);border-radius:4px;margin-top:4px">${esc(d.record_name)}  TXT  ${esc(d.txt_value)}</code>
+`}
+              <!-- ONE place for the outcome. The last failure is persisted server-side and was
+                   rendered here, while the click handler wrote the live result into a second
+                   element below it — so retrying showed the identical sentence twice, in two
+                   different colours. The handler replaces this element's text instead. -->
+              <div id="ssoVerify-${esc(p.id)}-${di}" style="margin-top:4px;color:var(--danger,#b91c1c)">${d.verified ? '' : esc(d.last_error || '')}</div>
+            </div>`).join('')}
+        </div>` : ''}
+
+        <div id="ssoTest-${esc(p.id)}" style="display:none;margin-top:8px;font-size:12px"></div>
+        <div id="ssoEdit-${esc(p.id)}" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:none">
+          <div style="display:grid;gap:10px;max-width:560px">
+            <div class="form-group"><label>${esc(t('sso.f_name'))}</label>
+              <input type="text" class="input" data-f="name" value="${esc(p.name)}"></div>
+            <div class="form-group"><label>${esc(t('sso.f_issuer'))}</label>
+              <input type="url" class="input" data-f="issuer" value="${esc(p.issuer)}"></div>
+            <div class="form-group"><label>${esc(t('sso.f_client_id'))}</label>
+              <input type="text" class="input" data-f="client_id" value="${esc(p.client_id)}"></div>
+            <div class="form-group"><label>${esc(t('sso.f_client_secret'))}</label>
+              <input type="password" class="input" data-f="client_secret" autocomplete="new-password"
+                     placeholder="${esc(p.has_client_secret ? t('sso.secret_set') : t('sso.secret_none'))}">
+              <!-- A secret can never be shown back: the API does not return it. Blank therefore means
+                   "leave it alone" rather than "clear it", which is what stops a save from silently
+                   wiping a working configuration. Clearing is a separate, explicit choice. -->
+              <div style="font-size:11px;color:var(--text-muted);margin-top:4px">${esc(t('sso.secret_edit_hint'))}</div>
+              ${p.has_client_secret ? `
+              <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-top:6px">
+                <input type="checkbox" data-f="clear_secret"> ${esc(t('sso.secret_clear'))}
+              </label>` : ''}
+            </div>
+            <div class="form-group"><label>${esc(t('sso.f_domains'))}</label>
+              <input type="text" class="input" data-f="email_domains" value="${esc(p.email_domains)}"></div>
+            <div style="display:flex;gap:6px">
+              <button class="btn btn-primary btn-sm" data-sso-save="${esc(p.id)}">${esc(t('sso.save'))}</button>
+              <button class="btn btn-secondary btn-sm" data-sso-cancel="${esc(p.id)}">${esc(t('sso.cancel'))}</button>
+            </div>
+          </div>
+        </div>
+      </div>`).join('');
+
+    listEl.querySelectorAll('[data-sso-toggle]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        await ssoRequest('PUT', `/${btn.dataset.ssoToggle}`, { enabled: btn.dataset.enabled !== '1' });
+      });
+    });
+    /*
+     * Ask the server to look for the DNS record now. Pull-based on purpose: the admin has just
+     * edited DNS and wants an answer, and a failure has to say WHICH failure — not published yet,
+     * published wrong, or the claim expired and the record has changed underneath them.
+     */
+    if (onlyState) {
+      const pend = onlyState.pending_removal_request;
+      const box = document.createElement('div');
+      box.style.cssText = 'border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin-top:4px';
+      box.innerHTML = `
+        <div style="font-weight:600;margin-bottom:4px">${esc(t('sso.only_heading'))}</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">${esc(t('sso.only_help'))}</div>
+        ${onlyState.sso_only ? `
+          <div style="font-size:13px;margin-bottom:8px">✅ ${esc(t('sso.only_on'))}</div>
+          ${pend
+            ? `<div style="font-size:12px;color:var(--warning,#b45309)">⏳ ${esc(t('sso.only_pending'))}</div>
+               <button class="btn btn-secondary btn-sm" id="ssoOnlyCancel" data-req="${esc(pend.id)}" style="margin-top:6px">${esc(t('sso.only_cancel'))}</button>`
+            : `<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">${esc(t('sso.only_remove_help'))}</div>
+               <button class="btn btn-secondary btn-sm" id="ssoOnlyRequest">${esc(t('sso.only_request'))}</button>`}
+        ` : `
+          <div style="font-size:13px;margin-bottom:8px">${esc(t('sso.only_off'))}</div>
+          ${onlyState.verified_domains
+            ? `<button class="btn btn-secondary btn-sm" id="ssoOnlyEnable">${esc(t('sso.only_enable'))}</button>`
+            : `<div style="font-size:12px;color:var(--warning,#b45309)">⚠️ ${esc(t('sso.only_needs_domain'))}</div>`}
+        `}`;
+      listEl.appendChild(box);
+
+      const post = async (url, body, method = 'POST') => {
+        const r = await fetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` },
+          body: body ? JSON.stringify(body) : undefined,
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) { showToast(j.error || t('sso.only_failed'), 'error'); return null; }
+        return j;
+      };
+
+      const enableBtn = box.querySelector('#ssoOnlyEnable');
+      if (enableBtn) enableBtn.addEventListener('click', async () => {
+        // Confirmed, because it removes the only way in for everyone at these domains, and the way
+        // back needs the operator rather than this button.
+        if (!window.confirm(t('sso.only_confirm'))) return;
+        const r = await post(`/api/organizations/${orgId}/sso-only`);
+        if (r) {
+          showToast(t('sso.only_on'), 'success');
+          /*
+           * Name the people who just lost their only way in. The server reports them precisely so
+           * the admin finds out HERE rather than from a support ticket — and it was being thrown
+           * away, which made the whole warning pointless.
+           */
+          const stranded = r.stranded_members || [];
+          if (stranded.length) {
+            window.alert(t('sso.only_stranded', { list: stranded.join('\n') }));
+          }
+          await loadSso();
+        }
+      });
+
+      const reqBtn = box.querySelector('#ssoOnlyRequest');
+      if (reqBtn) reqBtn.addEventListener('click', async () => {
+        const reason = window.prompt(t('sso.only_reason_prompt')) || '';
+        const r = await post(`/api/organizations/${orgId}/sso-only/removal-request`, { reason });
+        if (r) { showToast(t('sso.only_requested'), 'success'); await loadSso(); }
+      });
+
+      const cancelBtn = box.querySelector('#ssoOnlyCancel');
+      if (cancelBtn) cancelBtn.addEventListener('click', async () => {
+        const r = await post(`/api/organizations/${orgId}/sso-only/removal-request/${cancelBtn.dataset.req}`, null, 'DELETE');
+        if (r) { showToast(t('sso.only_cancelled'), 'success'); await loadSso(); }
+      });
+    }
+
+    listEl.querySelectorAll('[data-sso-verify]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.ssoVerify;
+        const domain = btn.dataset.domain;
+        // Indexed, not derived from the domain: `a.b.test` and `a-b.test` both slugify to
+        // `a-b-test`, and getElementById would put one domain's answer in the other's box.
+        const out = document.getElementById(`ssoVerify-${id}-${btn.dataset.di}`);
+        btn.disabled = true;
+        if (out) { out.style.color = 'var(--text-muted)'; out.textContent = t('sso.verifying'); }
+        try {
+          const res = await fetch(`/api/organizations/${orgId}/sso/${id}/domains/${encodeURIComponent(domain)}/verify`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+          });
+          const body = await res.json().catch(() => ({}));
+          if (body.ok) {
+            showToast(t('sso.domain_verified_toast', { domain }), 'success');
+            await loadSso();       // re-render: the domain now routes, and the card must say so
+            return;
+          }
+          // An expired claim has already been reissued server-side, so the records on screen are
+          // stale — reload rather than leaving the admin publishing a value that no longer matches.
+          if (body.expired) {
+            showToast(body.error || t('sso.verify_failed'), 'error');
+            await loadSso();
+            return;
+          }
+          if (out) { out.style.color = 'var(--danger,#b91c1c)'; out.textContent = body.error || t('sso.verify_failed'); }
+        } catch {
+          if (out) { out.style.color = 'var(--danger,#b91c1c)'; out.textContent = t('sso.verify_failed'); }
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    });
+    listEl.querySelectorAll('[data-sso-test]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.ssoTest;
+        const out = document.getElementById(`ssoTest-${id}`);
+        if (!out) return;
+        out.style.display = '';
+        out.textContent = t('sso.testing');
+        try {
+          const res = await fetch(`/api/organizations/${orgId}/sso/${id}/test`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+          });
+          const data = await res.json();
+          if (!res.ok) { out.textContent = data.error || t('sso.test_failed'); return; }
+          /*
+           * Literal keys, never a key built by concatenating a check name. Doing that defeats the
+           * check in server/test/i18n-keys-exist.js that every key an operator can see is
+           * translated — and a check name the UI does not know would render as raw key text. The
+           * fallback keeps an unknown one readable instead.
+           */
+          const CHECK_LABELS = {
+            discovery: t('sso.check_discovery'),
+            endpoints: t('sso.check_endpoints'),
+            signing_keys: t('sso.check_signing_keys'),
+          };
+          const rows = (data.checks || []).map((c) => `
+            <div>${c.ok ? '✅' : '❌'} ${esc(CHECK_LABELS[c.name] || c.name)} — <span style="color:var(--text-muted)">${esc(c.detail || '')}</span></div>`).join('');
+          /*
+           * The caveat is shown on SUCCESS, not tucked away. Discovery and keys prove the provider
+           * exists and that we could verify a token it signs — they say nothing about whether the
+           * client id, the secret, or the redirect URI registration are right. A green tick that
+           * implied "SSO works" would send an admin away from the one thing still to check.
+           */
+          out.innerHTML = rows + (data.ok
+            ? `<div style="margin-top:6px;color:var(--text-muted)">${esc(t('sso.test_caveat'))}</div>`
+            : '');
+        } catch {
+          out.textContent = t('sso.test_failed');
+        }
+      });
+    });
+    listEl.querySelectorAll('[data-sso-edit]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const panel = document.getElementById(`ssoEdit-${btn.dataset.ssoEdit}`);
+        if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+      });
+    });
+    listEl.querySelectorAll('[data-sso-cancel]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const panel = document.getElementById(`ssoEdit-${btn.dataset.ssoCancel}`);
+        if (panel) panel.style.display = 'none';
+      });
+    });
+    listEl.querySelectorAll('[data-sso-save]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const panel = document.getElementById(`ssoEdit-${btn.dataset.ssoSave}`);
+        if (!panel) return;
+        const val = (f) => panel.querySelector(`[data-f="${f}"]`)?.value?.trim() ?? '';
+        const body = {
+          name: val('name'),
+          issuer: val('issuer'),
+          client_id: val('client_id'),
+          email_domains: val('email_domains'),
+        };
+        /*
+         * Three states, and only these three:
+         *   typed a value        -> replace the secret
+         *   ticked "remove"      -> send '' so the server clears it
+         *   left blank, unticked -> send NOTHING, so the stored secret survives
+         * Sending '' on every save is the bug this shape exists to avoid.
+         */
+        const typed = panel.querySelector('[data-f="client_secret"]')?.value || '';
+        const clearing = panel.querySelector('[data-f="clear_secret"]')?.checked;
+        if (typed) body.client_secret = typed;
+        else if (clearing) body.client_secret = '';
+
+        if (!body.name || !body.issuer || !body.client_id) {
+          showToast(t('sso.missing_fields'), 'error');
+          return;
+        }
+        await ssoRequest('PUT', `/${btn.dataset.ssoSave}`, body);
+      });
+    });
+    listEl.querySelectorAll('[data-sso-delete]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        if (!confirm(t('sso.confirm_delete'))) return;
+        await ssoRequest('DELETE', `/${btn.dataset.ssoDelete}`);
+      });
+    });
+  }
+
+  async function ssoRequest(method, path = '', body) {
+    try {
+      const res = await fetch(`/api/organizations/${orgId}/sso${path}`, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('token')}`,
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const data = await res.json().catch(() => ({}));
+      // The server's message is the useful one here — a bad issuer or a domain already claimed by
+      // another organization both say exactly what went wrong, and a generic failure would not.
+      if (!res.ok) { showToast(data.error || t('sso.save_failed'), 'error'); return false; }
+      // "Saved" for a DELETE read as though nothing had been destroyed.
+      showToast(t(method === 'DELETE' ? 'sso.removed' : 'sso.saved'), 'success');
+      await loadSso();
+      return true;
+    } catch {
+      showToast(t('sso.save_failed'), 'error');
+      return false;
+    }
+  }
+
+  document.getElementById('ssoCreateBtn')?.addEventListener('click', async () => {
+    const payload = {
+      name: document.getElementById('ssoName').value.trim(),
+      issuer: document.getElementById('ssoIssuer').value.trim(),
+      client_id: document.getElementById('ssoClientId').value.trim(),
+      client_secret: document.getElementById('ssoClientSecret').value,
+      email_domains: document.getElementById('ssoDomains').value.trim(),
+    };
+    if (!payload.name || !payload.issuer || !payload.client_id) {
+      showToast(t('sso.missing_fields'), 'error');
+      return;
+    }
+    if (await ssoRequest('POST', '', payload)) {
+      ['ssoName', 'ssoIssuer', 'ssoClientId', 'ssoClientSecret', 'ssoDomains']
+        .forEach((id) => { document.getElementById(id).value = ''; });
+      document.getElementById('ssoAddDetails').open = false;
+    }
+  });
+
+  loadSso();
+
+
   document.getElementById('createTokenBtn')?.addEventListener('click', async () => {
     const name = document.getElementById('tokName').value.trim();
     const scope = document.getElementById('tokScope').value;
@@ -830,25 +1241,30 @@ async function loadUsers() {
         </thead>
         <tbody>
           ${users.map(u => `
-            <tr style="border-bottom:1px solid var(--border)" data-user-id="${u.id}">
+            <!-- ESCAPED. A SECOND copy of the platform users table lives here, rendered from the
+                 same endpoint as the one in views/admin.js. Escaping only that one left this whole
+                 table wide open, including a raw text node for the email - and an org or workspace
+                 admin can choose an email, so this executed in the platform admin's session. When
+                 you touch one of these tables, touch both. -->
+            <tr style="border-bottom:1px solid var(--border)" data-user-id="${esc(u.id)}">
               <td style="padding:10px 12px">
-                <div style="font-weight:500">${u.name || u.email}</div>
-                <div style="font-size:11px;color:var(--text-muted)">${u.email}</div>
+                <div style="font-weight:500">${esc(u.name || u.email)}</div>
+                <div style="font-size:11px;color:var(--text-muted)">${esc(u.email)}</div>
               </td>
               <td style="padding:10px 12px">
-                <span style="background:var(--bg-primary);padding:2px 8px;border-radius:10px;font-size:11px">${u.auth_provider}</span>
+                <span style="background:var(--bg-primary);padding:2px 8px;border-radius:10px;font-size:11px">${esc(u.auth_provider)}</span>
               </td>
               <td style="padding:10px 12px">
-                <span style="color:${isPlatformAdmin(u) ? 'var(--accent)' : 'var(--text-secondary)'}">${u.role}</span>
+                <span style="color:${isPlatformAdmin(u) ? 'var(--accent)' : 'var(--text-secondary)'}">${esc(u.role)}</span>
               </td>
               <td style="padding:10px 12px">
-                <select class="input plan-select" data-user-id="${u.id}" style="padding:4px 8px;font-size:12px;width:auto">
-                  ${plans.map(p => `<option value="${p.id}" ${u.plan_id === p.id ? 'selected' : ''}>${p.display_name}</option>`).join('')}
+                <select class="input plan-select" data-user-id="${esc(u.id)}" style="padding:4px 8px;font-size:12px;width:auto">
+                  ${plans.map(p => `<option value="${esc(p.id)}" ${u.plan_id === p.id ? 'selected' : ''}>${esc(p.display_name)}</option>`).join('')}
                 </select>
               </td>
               <td style="padding:10px 12px;white-space:nowrap">
-                ${u.auth_provider === 'local' && u.id !== currentUser.id ? `<button class="btn btn-secondary btn-sm reset-user-pw-btn" data-user-id="${u.id}" data-user-email="${u.email}" style="margin-right:4px">${t('settings.user.reset_password')}</button>` : ''}
-                ${u.id !== currentUser.id ? `<button class="btn btn-danger btn-sm delete-user-btn" data-user-id="${u.id}">${t('settings.user.remove')}</button>` : `<span style="color:var(--text-muted);font-size:11px">${t('settings.user.you')}</span>`}
+                ${u.auth_provider === 'local' && u.id !== currentUser.id ? `<button class="btn btn-secondary btn-sm reset-user-pw-btn" data-user-id="${esc(u.id)}" data-user-email="${esc(u.email)}" style="margin-right:4px">${t('settings.user.reset_password')}</button>` : ''}
+                ${u.id !== currentUser.id ? `<button class="btn btn-danger btn-sm delete-user-btn" data-user-id="${esc(u.id)}">${t('settings.user.remove')}</button>` : `<span style="color:var(--text-muted);font-size:11px">${t('settings.user.you')}</span>`}
               </td>
             </tr>
           `).join('')}

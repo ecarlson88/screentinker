@@ -396,6 +396,105 @@ const migrations = [
   // Per-telemetry-row rather than on `devices` because a display can be swapped, unplugged or
   // renegotiated without the player re-registering, and because a dual-output player registers ONE
   // ROW PER OUTPUT (see output_index) — each row must carry its own screen, not the box's first.
+  /*
+   * Per-organization SSO.
+   *
+   * Instance-wide providers come from the environment and belong to whoever runs the server. These
+   * belong to a CUSTOMER: an organization brings its own identity provider, and its people sign in
+   * with it without the operator touching a config file.
+   *
+   * `slug` is globally unique and randomly generated rather than chosen, because it is a URL path
+   * segment (/api/auth/oidc/<slug>/start) and two organizations both wanting "okta" must not be
+   * able to collide — or to guess each other's. The admin only ever sees `name`.
+   *
+   * `client_secret_enc` is AES-256-GCM via lib/secretbox, the same at-rest treatment as TOTP
+   * secrets and BYOK AI keys. PKCE means a secret is optional, so a public client stores NULL.
+   *
+   * `email_domains` is the list an admin TYPED, kept for display and for the edit form. It does not
+   * drive routing — org_sso_domains does, and only its verified rows (see the table below). The two
+   * are not interchangeable: reading this column to decide who may sign in would let a tenant route
+   * a domain it never proved.
+   */
+  `CREATE TABLE IF NOT EXISTS org_sso_providers (
+    id                 TEXT PRIMARY KEY,
+    organization_id    TEXT NOT NULL,
+    slug               TEXT NOT NULL UNIQUE,
+    name               TEXT NOT NULL,
+    issuer             TEXT NOT NULL,
+    client_id          TEXT NOT NULL,
+    client_secret_enc  TEXT,
+    scopes             TEXT NOT NULL DEFAULT 'openid email profile',
+    email_domains      TEXT NOT NULL DEFAULT '',
+    enabled            INTEGER NOT NULL DEFAULT 1,
+    created_at         INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    updated_at         INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
+  )`,
+  "CREATE INDEX IF NOT EXISTS idx_org_sso_org ON org_sso_providers(organization_id)",
+  /*
+   * Claimed sign-in domains, and the proof that the claimant controls them.
+   *
+   * `org_sso_providers.email_domains` used to be the whole story, and first-claim-wins on a text
+   * field is not a claim — it is a land grab. A tenant could type a domain it had nothing to do
+   * with and every person at that company typing their work address into the login page would be
+   * routed to the squatter's identity provider. It also let one account permanently deny a domain
+   * to its real owner, and strand accounts at addresses it never owned.
+   *
+   * So a domain is inert until DNS says otherwise. `verified_at` NULL means claimed but unproven:
+   * it routes nobody, and the login callback will not accept an assertion for it. The row still
+   * reserves the name, so two tenants cannot race the same domain, but reserving is all it does.
+   *
+   * `token` is what has to appear in DNS. It is per-domain rather than per-organization so that
+   * publishing one proof cannot be replayed to claim a second domain.
+   */
+  `CREATE TABLE IF NOT EXISTS org_sso_domains (
+    id                 TEXT PRIMARY KEY,
+    organization_id    TEXT NOT NULL,
+    provider_id        TEXT,
+    domain             TEXT NOT NULL UNIQUE,
+    token              TEXT NOT NULL,
+    -- When the current token was issued. An UNVERIFIED claim is only good for 8 hours from here:
+    -- past that the token is dead and the reservation lapses, so a domain nobody can prove cannot
+    -- be held indefinitely by whoever typed it first. Verified rows ignore this entirely.
+    token_issued_at    INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    verified_at        INTEGER,
+    last_checked_at    INTEGER,
+    last_error         TEXT,
+    created_at         INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
+    -- A verified row never expires and domain is globally UNIQUE, so a row that outlives its
+    -- provider blocks that domain for EVERYONE, forever, while being invisible in the API. The
+    -- delete handler clears these explicitly; this is the backstop for every other route out
+    -- (an organization cascade, a manual delete, a future caller that forgets).
+    FOREIGN KEY (provider_id) REFERENCES org_sso_providers(id) ON DELETE CASCADE
+  )`,
+  "CREATE INDEX IF NOT EXISTS idx_org_sso_domains_org ON org_sso_domains(organization_id)",
+  "CREATE INDEX IF NOT EXISTS idx_org_sso_domains_provider ON org_sso_domains(provider_id)",
+  /*
+   * SSO-ONLY: an organization may require its people to use its identity provider, so a password
+   * is no longer an alternative way in. That is the point of buying SSO — the IdP holds the MFA,
+   * the conditional access and the instant deprovisioning, and a password box beside it is a way
+   * around all three.
+   *
+   * ⚠️ Asymmetric on purpose. Turning it ON is the safe direction and an org admin does it alone.
+   * Turning it OFF is how a compromised admin would re-open password login, and it is also what
+   * an org will demand at its worst moment — IdP down, nobody can work — which is exactly when a
+   * self-service switch gets flipped under pressure. So removal goes through the operator: the
+   * request is recorded here and a platform admin has to approve it.
+   */
+  `CREATE TABLE IF NOT EXISTS org_sso_only_requests (
+    id                 TEXT PRIMARY KEY,
+    organization_id    TEXT NOT NULL,
+    requested_by       TEXT,
+    reason             TEXT,
+    status             TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected | cancelled
+    decided_by         TEXT,
+    decided_at         INTEGER,
+    decision_note      TEXT,
+    created_at         INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
+  )`,
+  "CREATE INDEX IF NOT EXISTS idx_sso_only_req_status ON org_sso_only_requests(status, organization_id)",
   "ALTER TABLE device_telemetry ADD COLUMN attached_display TEXT",
   "ALTER TABLE device_telemetry ADD COLUMN video_mode TEXT",
   // Panel temperature in Celsius. REAL because the sensor reports fractions, and nullable because
@@ -564,6 +663,40 @@ for (const sql of migrations) {
   }
 }
 if (_migApplied > 0) console.log(`[migrate] applied ${_migApplied} new column migration(s)`);
+
+/*
+ * Say something when per-org SSO domains predate the proof requirement.
+ *
+ * Domains used to be a comma list an admin typed, and that list routed logins. They now route only
+ * once DNS proves them, so on an instance upgraded from an earlier build of this feature every one
+ * of those domains silently stops working — the provider still says "enabled", the typed list is
+ * still on screen, and every federated user in that organization is locked out with no self-service
+ * way back.
+ *
+ * They are deliberately NOT auto-claimed. A claim now notifies the operator, reserves the name
+ * against other tenants and starts an 8-hour clock; manufacturing all of that on an admin's behalf,
+ * for domains nobody ever proved, is not a migration's decision to make. So: name them, loudly,
+ * once per boot, and let an admin re-add the ones they still want.
+ */
+try {
+  const stranded = db.prepare(`
+    SELECT p.slug, p.name, p.organization_id, p.email_domains
+      FROM org_sso_providers p
+     WHERE p.email_domains != ''
+       AND NOT EXISTS (SELECT 1 FROM org_sso_domains d WHERE d.provider_id = p.id)
+  `).all();
+  if (stranded.length) {
+    console.warn(`[migrate] ⚠️  ${stranded.length} SSO provider(s) have typed domains that were never verified.`);
+    console.warn('[migrate]    Domains now route only after a DNS TXT record proves them, so these route NOBODY:');
+    for (const r of stranded) {
+      console.warn(`[migrate]      ${r.name} (${r.slug}, org ${r.organization_id}): ${r.email_domains}`);
+    }
+    console.warn('[migrate]    Re-add each domain in Settings to get its record, then Verify. See README, "Proving a domain".');
+  }
+} catch (e) {
+  // The table may not exist yet on a first boot; that is not a problem worth a stack trace.
+  if (!/no such table/i.test(e.message)) console.error('[migrate] SSO domain check failed:', e.message);
+}
 
 // #74/#75 per-item schedules: the playlist_item_schedules table is created
 // idempotently by schema.sql (CREATE TABLE IF NOT EXISTS, run every boot, so it
@@ -824,6 +957,27 @@ migrateGroupSchedules();
 // exist on resource tables - the Phase 1 backfill loop reads team_id and
 // updates workspace_id.
 ensureMultitenancyMigration();
+
+/*
+ * `organizations.sso_only` — added HERE, not in the migrations array above.
+ *
+ * That array runs BEFORE ensureMultitenancyMigration(), which is what creates the organizations
+ * table, so on a fresh install the ALTER hit a table that did not exist yet: `[migrate] FAILED …
+ * no such table: organizations`, one console.error among ~85 migration lines. The instance then
+ * ran its entire first boot with the SSO settings screen 500ing and — far worse —
+ * ssoOnlyForEmail() catching `no such column` and returning "not SSO-only", which is password
+ * login proceeding for an organization that had switched it off. It self-healed on the second
+ * boot, which is exactly what makes it easy to miss.
+ */
+try {
+  const orgCols = db.prepare('PRAGMA table_info(organizations)').all().map((c) => c.name);
+  if (orgCols.length && !orgCols.includes('sso_only')) {
+    db.exec('ALTER TABLE organizations ADD COLUMN sso_only INTEGER NOT NULL DEFAULT 0');
+    console.log('[migrate] added organizations.sso_only');
+  }
+} catch (e) {
+  console.error('[migrate] could not add organizations.sso_only:', e.message);
+}
 
 // Phase 2.2c migration: backfill content_folders.workspace_id from owner's
 // default workspace. The ALTER lives in the migrations array above; this

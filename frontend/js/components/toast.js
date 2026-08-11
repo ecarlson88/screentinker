@@ -1,3 +1,15 @@
+/*
+ * ⚠️ Messages are ESCAPED. This builds innerHTML, and callers pass server error strings straight
+ * in — including ones that reflect user input verbatim, such as the OIDC issuer in
+ * `not a URL: <value>`. A review typed `<img src=x onerror=alert(1)>` as an issuer and got script
+ * execution in the admin's own session. A toast is a place text goes, never markup.
+ */
+function esc(v) {
+  return String(v == null ? '' : v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 export function showToast(message, type = 'info', duration = 4000) {
   const container = document.getElementById('toastContainer');
   const toast = document.createElement('div');
@@ -10,7 +22,7 @@ export function showToast(message, type = 'info', duration = 4000) {
         type === 'error' ? '<circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>' :
         '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>'}
     </svg>
-    <span>${message}</span>
+    <span>${esc(message)}</span>
   `;
   container.appendChild(toast);
   setTimeout(() => {

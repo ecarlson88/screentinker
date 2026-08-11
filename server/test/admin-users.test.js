@@ -72,7 +72,11 @@ db.exec(`
   );
   CREATE TABLE organizations (
     id TEXT PRIMARY KEY, name TEXT NOT NULL,
-    owner_user_id TEXT, plan_id TEXT, subscription_status TEXT
+    owner_user_id TEXT, plan_id TEXT, subscription_status TEXT,
+    -- Mirrors the real schema. Login refuses when it cannot determine whether an organization
+    -- requires single sign-on, so a fixture missing this column fails closed — correctly, but it
+    -- is the fixture that is wrong, not the guard.
+    sso_only INTEGER NOT NULL DEFAULT 0
   );
   CREATE TABLE activity_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
