@@ -39,7 +39,7 @@ export async function render(container) {
       <div class="form-group" style="margin:0"><label>${t('report.device')}</label>
         <select id="reportDevice" class="input" style="width:200px;background:var(--bg-input)">
           <option value="">${t('report.all_devices')}</option>
-          ${devices.map(d => `<option value="${d.id}">${d.name}</option>`).join('')}
+          ${devices.map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join('')}
         </select>
       </div>
       <div class="form-group" style="margin:0"><label>${t('report.start_date')}</label>
@@ -182,10 +182,10 @@ function renderBarChart(containerId, data) {
   const maxVal = Math.max(...data.map(d => d.value), 1);
 
   container.innerHTML = data.map(d => `
-    <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;min-width:0" title="${d.label}: ${d.value}">
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;min-width:0" title="${esc(d.label)}: ${esc(d.value)}">
       <div style="font-size:9px;color:var(--text-muted);margin-bottom:2px;display:${d.value > 0 ? 'block' : 'none'}">${d.value}</div>
       <div style="width:100%;max-width:20px;height:${Math.max(2, (d.value / maxVal) * 160)}px;background:var(--accent);border-radius:2px 2px 0 0;min-height:2px"></div>
-      <div style="font-size:8px;color:var(--text-muted);margin-top:4px;transform:rotate(-45deg);white-space:nowrap">${d.label}</div>
+      <div style="font-size:8px;color:var(--text-muted);margin-top:4px;transform:rotate(-45deg);white-space:nowrap">${esc(d.label)}</div>
     </div>
   `).join('');
 }

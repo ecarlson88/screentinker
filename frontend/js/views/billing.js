@@ -26,7 +26,7 @@ export async function render(container) {
       <div class="settings-section">
         <h3>${t('billing.current_plan')}</h3>
         <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px">
-          <div style="font-size:28px;font-weight:700;color:var(--accent)">${subData.plan.display_name}</div>
+          <div style="font-size:28px;font-weight:700;color:var(--accent)">${esc(subData.plan.display_name)}</div>
           ${subData.self_hosted ? `<span style="background:var(--success-dim);color:var(--success);padding:4px 10px;border-radius:12px;font-size:11px;font-weight:500">${t('billing.self_hosted')}</span>` : ''}
           ${subData.trial?.active ? `<span style="background:var(--warning-dim);color:var(--warning);padding:4px 10px;border-radius:12px;font-size:11px;font-weight:500">${t('billing.trial_days_left', { n: subData.trial.days_left })}</span>` : ''}
         </div>
@@ -75,7 +75,7 @@ export async function render(container) {
           ${plans.map(p => `
             <div style="background:var(--bg-secondary);border:${p.id === subData.plan.id ? '2px solid var(--accent)' : '1px solid var(--border)'};border-radius:var(--radius-lg);padding:20px;position:relative">
               ${p.id === subData.plan.id ? `<div style="position:absolute;top:-10px;right:12px;background:var(--accent);color:white;padding:2px 10px;border-radius:10px;font-size:11px;font-weight:500">${t('billing.current')}</div>` : ''}
-              <div style="font-size:18px;font-weight:700;margin-bottom:4px">${p.display_name}</div>
+              <div style="font-size:18px;font-weight:700;margin-bottom:4px">${esc(p.display_name)}</div>
               <div style="font-size:24px;font-weight:700;color:var(--accent);margin-bottom:12px">
                 ${p.price_monthly > 0 ? `$${p.price_monthly}<span style="font-size:13px;color:var(--text-secondary);font-weight:400">${t('billing.per_month')}</span>` : t('billing.free')}
               </div>

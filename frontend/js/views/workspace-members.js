@@ -289,7 +289,7 @@ export function mapMutationError(err) {
 }
 
 function renderError(message) {
-  return `<div style="color:var(--danger);font-size:14px;padding:16px;background:var(--bg-input);border-radius:6px">${message}</div>`;
+  return `<div style="color:var(--danger);font-size:14px;padding:16px;background:var(--bg-input);border-radius:6px">${esc(message)}</div>`;
 }
 
 function formatDate(ts) {

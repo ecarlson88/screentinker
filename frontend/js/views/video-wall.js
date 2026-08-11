@@ -87,7 +87,7 @@ async function renderList(container) {
           </div>
         </div>
         <div class="content-item-body">
-          <div class="content-item-name">${w.name}</div>
+          <div class="content-item-name">${esc(w.name)}</div>
           <div class="content-item-size">${t('wall.grid_summary', { cols: w.grid_cols, rows: w.grid_rows, n: w.devices?.length || 0 })}</div>
         </div>
       </div>
