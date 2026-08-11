@@ -293,16 +293,34 @@ function orgDb() {
       scopes TEXT NOT NULL DEFAULT 'openid email profile', email_domains TEXT NOT NULL DEFAULT '',
       enabled INTEGER NOT NULL DEFAULT 1,
       created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE org_sso_domains (
+      id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, provider_id TEXT, domain TEXT NOT NULL UNIQUE,
+      token TEXT NOT NULL, token_issued_at INTEGER NOT NULL DEFAULT 0, verified_at INTEGER,
+      last_checked_at INTEGER, last_error TEXT, created_at INTEGER NOT NULL DEFAULT 0);
   `);
   return d;
 }
 
+/*
+ * `domains` are VERIFIED (DNS proof recorded); `pending` are claimed but unproven. The distinction
+ * is the whole point of the domain table, so the harness makes it impossible to write a test that
+ * blurs the two: a test that wants routing must say which state it is testing.
+ */
 function withOrgDb(rows, fn) {
   const d = orgDb();
+  let n = 0;
   for (const r of rows) {
+    const typed = [...(r.domains || '').split(','), ...(r.pending || '').split(',')].filter(Boolean).join(',');
     d.prepare(`INSERT INTO org_sso_providers (id, organization_id, slug, name, issuer, client_id, email_domains, enabled)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(r.id, r.org, r.slug, r.name, r.issuer || ISSUER, r.clientId || 'cid', r.domains || '', r.enabled === undefined ? 1 : r.enabled);
+      .run(r.id, r.org, r.slug, r.name, r.issuer || ISSUER, r.clientId || 'cid', typed, r.enabled === undefined ? 1 : r.enabled);
+    const addDomain = (dom, verifiedAt) => d.prepare(
+      `INSERT INTO org_sso_domains (id, organization_id, provider_id, domain, token, token_issued_at, verified_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(`dom${++n}`, r.org, r.id, dom, `tok${n}`, Math.floor(Date.now() / 1000), verifiedAt);
+    // Verified in claim order unless the test pins it, so "who proved it first" stays testable.
+    for (const dom of (r.domains || '').split(',').filter(Boolean)) addDomain(dom, (r.verifiedAt || 1000) + n);
+    for (const dom of (r.pending || '').split(',').filter(Boolean)) addDomain(dom, null);
   }
   // Swap the module's lazily-resolved connection for this in-memory one.
   const real = require('../db/database');
@@ -359,16 +377,16 @@ test('an instance provider wins a slug clash with an org one', () => {
   });
 });
 
-test('the first organization to claim a domain keeps it', () => {
-  // Two rows, same domain. forEmail must be deterministic rather than returning whichever the
-  // database happened to hand back first — the API refuses the second claim, and this is the
-  // backstop if a row ever gets in another way.
-  withOrgDb([
-    { id: '1', org: 'org-a', slug: 'orgaaa', name: 'First', domains: 'shared.com' },
-    { id: '2', org: 'org-b', slug: 'orgbbb', name: 'Second', domains: 'shared.com' },
-  ], (m) => {
-    assert.equal(m.forEmail('x@shared.com').name, 'First');
-  });
+test('a domain can only be held by one organization AT THE DATABASE', () => {
+  // Uniqueness used to be enforced only by a check in the route, which a race defeated twice in
+  // review. It is now a UNIQUE constraint, so a second claim cannot exist even if the check is
+  // bypassed entirely — the strongest form of "first claim wins" available here.
+  assert.throws(() => {
+    withOrgDb([
+      { id: '1', org: 'org-a', slug: 'orgaaa', name: 'First', domains: 'shared.com' },
+      { id: '2', org: 'org-b', slug: 'orgbbb', name: 'Second', domains: 'shared.com' },
+    ], () => {});
+  }, /UNIQUE/);
 });
 
 test('no database means no org providers, and no crash', () => {
@@ -395,6 +413,7 @@ test('TAKEOVER: an org provider may not assert an email outside its own domains'
   withOrgDb([{ id: '1', org: 'org-evil', slug: 'orgevil', name: 'Evil', domains: 'evil.test' }], (m) => {
     const p = m.getOrgProvider('orgevil');
     assert.equal(p.emailDomains, 'evil.test', 'the callback cannot confine what it cannot see');
+    assert.ok(!p.emailDomains.includes('victim'), 'and only ever the domains that were PROVED');
     assert.equal(p.organizationId, 'org-evil', 'and must know this is a tenant provider, not the operator\'s');
   });
 });
@@ -406,15 +425,43 @@ test('an INSTANCE provider carries no organization, so it is not domain-confined
   assert.equal(g.source, 'env');
 });
 
-test('domain routing is deterministic, not table-scan order', () => {
-  // forEmail used an unordered SELECT, so deleting and re-adding a provider silently flipped which
-  // IdP an entire domain routed to. Ordering makes the answer stable.
+test('domain routing follows who VERIFIED first, not table-scan order', () => {
+  /*
+   * forEmail used an unordered SELECT, so deleting and re-adding a provider silently flipped which
+   * IdP an entire domain routed to. The earlier version of this test asserted only that two calls
+   * agreed with each other, which an unordered scan satisfies within one process — it passed with
+   * the ordering removed and was therefore worth nothing. Assert the WINNER.
+   */
   withOrgDb([
-    { id: 'b', org: 'org-a', slug: 'orgbbb', name: 'Second', domains: 'shared.test' },
-    { id: 'a', org: 'org-a', slug: 'orgaaa', name: 'First', domains: 'shared.test' },
+    { id: 'b', org: 'org-a', slug: 'orgbbb', name: 'Later', domains: 'later.test', verifiedAt: 9000 },
+    { id: 'a', org: 'org-a', slug: 'orgaaa', name: 'Earlier', domains: 'earlier.test', verifiedAt: 1000 },
   ], (m) => {
-    const first = m.forEmail('x@shared.test').name;
-    assert.equal(m.forEmail('x@shared.test').name, first, 'same answer every time');
+    assert.equal(m.forEmail('x@earlier.test').name, 'Earlier');
+    assert.equal(m.forEmail('x@later.test').name, 'Later');
+  });
+});
+
+test('AN UNVERIFIED DOMAIN ROUTES NOBODY', () => {
+  /*
+   * The point of DNS verification. A tenant may type any domain — including a company they have
+   * nothing to do with — and until a record proves control it must buy them nothing: no routing,
+   * and (see the callback tests) no ability to assert an address inside it.
+   */
+  withOrgDb([{ id: '1', org: 'org-x', slug: 'orgxxx', name: 'Squatter', pending: 'victim-corp.test' }], (m) => {
+    assert.equal(m.forEmail('ceo@victim-corp.test'), null, 'a claim is not a proof');
+    const p = m.getOrgProvider('orgxxx');
+    assert.equal(p.emailDomains, '', 'and the callback is given nothing it may confine to');
+  });
+});
+
+test('verifying one domain does not carry over to the others claimed with it', () => {
+  withOrgDb([{
+    id: '1', org: 'org-a', slug: 'orgaaa', name: 'Acme',
+    domains: 'acme.test', pending: 'acme-partner.test',
+  }], (m) => {
+    assert.equal(m.forEmail('x@acme.test').name, 'Acme');
+    assert.equal(m.forEmail('x@acme-partner.test'), null);
+    assert.equal(m.getOrgProvider('orgaaa').emailDomains, 'acme.test');
   });
 });
 
@@ -453,4 +500,104 @@ test('the blocklist is case- and whitespace-insensitive', () => {
   const { isPublicEmailDomain } = require('../lib/public-email-domains');
   assert.ok(isPublicEmailDomain('  GMAIL.COM '));
   assert.ok(isPublicEmailDomain('Outlook.Com'));
+});
+
+// ---------------------------------------------------------------------------------------------
+// The confinement itself.
+//
+// Everything above tests the DATA the callback confines against. These test the DECISION, which is
+// what actually stops the takeover — and each one below was checked by reverting the guard and
+// confirming the test goes red. A security test that passes against the vulnerable code is worse
+// than no test, because it is read as coverage.
+
+const authRoutes = require('../routes/auth');
+const { emailAllowedForProvider } = authRoutes;
+
+const orgProvider = (domains) => ({ slug: 'orgabc', organizationId: 'org-a', emailDomains: domains });
+
+test('CONFINEMENT: an org provider may only assert inside its verified domains', () => {
+  const p = orgProvider('acme.test');
+  assert.equal(emailAllowedForProvider(p, 'staff@acme.test'), true);
+  assert.equal(emailAllowedForProvider(p, 'victim@other.test'), false, 'THE TAKEOVER');
+  assert.equal(emailAllowedForProvider(p, 'admin@screentinker.com'), false);
+});
+
+test('CONFINEMENT: a provider with nothing verified may assert NOTHING', () => {
+  // The squatting case. A tenant types a domain, proves nothing, and must get nowhere — including
+  // for the domain they typed.
+  const p = orgProvider('');
+  assert.equal(emailAllowedForProvider(p, 'ceo@victim-corp.test'), false);
+  assert.equal(emailAllowedForProvider(p, 'anyone@anywhere.test'), false);
+});
+
+test('CONFINEMENT: the domain cannot be smuggled past the check', () => {
+  const p = orgProvider('acme.test');
+  for (const evil of [
+    'victim@other.test',                 // plainly outside
+    'victim@acme.test.evil.test',        // suffix, not the domain
+    'victim@evil.test@acme.test\n',      // trailing newline
+    'victim@sub.acme.test',              // subdomain is a different domain
+    'victim@acme.test.',                 // trailing dot
+    'victim@ACME.TEST.EVIL.TEST',
+    'no-at-sign',
+    'victim@',
+    '',
+  ]) {
+    assert.equal(emailAllowedForProvider(p, evil), false, `must refuse: ${JSON.stringify(evil)}`);
+  }
+  // ...while the legitimate forms still work, including the ones case normalisation must handle.
+  assert.equal(emailAllowedForProvider(p, 'Staff@Acme.Test'), true);
+  assert.equal(emailAllowedForProvider(p, 'a.b+tag@acme.test'), true);
+});
+
+test('CONFINEMENT: an INSTANCE provider is exempt, because the operator chose it', () => {
+  // Per-org verification is for tenant-supplied providers only. The instance's own Google or Okta
+  // is the operator's decision and is not domain-restricted — the same trust it has always had.
+  const instance = { slug: 'google', emailDomains: '' };
+  assert.equal(emailAllowedForProvider(instance, 'anyone@anywhere.test'), true);
+  assert.equal(emailAllowedForProvider(instance, 'admin@gmail.com'), true);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Domain ownership.
+//
+// A claim is not a proof. These pin the part that makes that true: an unverified domain routes
+// nobody, a claim lapses so it cannot be held forever, and a lapsed claim's token is dead so a
+// record left behind from an earlier attempt cannot satisfy a later one.
+
+const domainVerify = require('../lib/domain-verify');
+const NOW = 1800000000;
+
+test('an unverified claim lapses after 8 hours; a verified one never does', () => {
+  const claim = (agoS, verified) => ({ token_issued_at: NOW - agoS, verified_at: verified ? NOW - 99 : null });
+  assert.equal(domainVerify.isClaimExpired(claim(60, false), NOW), false, 'a minute old');
+  assert.equal(domainVerify.isClaimExpired(claim(8 * 3600 - 30, false), NOW), false, 'just inside');
+  assert.equal(domainVerify.isClaimExpired(claim(8 * 3600 + 1, false), NOW), true, 'just outside');
+  // Proof does not rot. Re-verifying on a timer would log a customer out over a DNS edit made
+  // months after they legitimately proved the domain.
+  assert.equal(domainVerify.isClaimExpired(claim(365 * 86400, true), NOW), false, 'verified, a year old');
+});
+
+test('the DNS record is per-domain and per-claim, so an old record proves nothing', () => {
+  const a = domainVerify.newToken();
+  const b = domainVerify.newToken();
+  assert.notEqual(a, b, 'two claims never share a token');
+  assert.ok(a.length >= 32, 'not guessable');
+
+  const one = domainVerify.instructions('acme.test', a);
+  const two = domainVerify.instructions('acme.test', b);
+  assert.equal(one.record_name, '_screentinker-verify.acme.test');
+  assert.notEqual(one.txt_value, two.txt_value, 'reissuing changes what must be published');
+  assert.notEqual(one.cname_value, two.cname_value);
+  // The record lives at a dedicated name, never the apex, where it would sit beside SPF and DMARC.
+  assert.ok(!domainVerify.instructions('acme.test', a).record_name.startsWith('acme.test'));
+});
+
+test('a lapsed claim frees the domain for someone else', () => {
+  // The anti-squat property: a domain nobody can prove cannot be held indefinitely by whoever typed
+  // it first. Modelled here on the same predicate the route uses to decide whether a row blocks.
+  const squatter = { domain: 'victim-corp.test', token_issued_at: NOW - (9 * 3600), verified_at: null };
+  const owner = { domain: 'victim-corp.test', token_issued_at: NOW - 60, verified_at: NOW };
+  assert.equal(domainVerify.isClaimExpired(squatter, NOW), true, 'the squatter no longer blocks it');
+  assert.equal(domainVerify.isClaimExpired(owner, NOW), false, 'the real owner, having proved it, does');
 });

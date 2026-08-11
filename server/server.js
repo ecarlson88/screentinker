@@ -529,7 +529,23 @@ function rateLimit(windowMs, maxRequests) {
     // req.path was '/' for ALL of them - i.e. /login, /register, /totp/verify shared
     // ONE per-IP counter (coupled limits; the /totp/verify brute-force limit wasn't
     // actually independent). originalUrl keeps each endpoint's limit separate.
-    const key = getClientIp(req) + (req.originalUrl || req.url || req.path).split('?')[0];
+    /*
+     * ⚠️ NORMALISE THE PATH, or the key is caller-controlled and the limit is decorative.
+     *
+     * Express routes non-strictly, so `/api/auth/login/` reaches the same handler as
+     * `/api/auth/login` — with a different originalUrl, hence a different bucket, hence a fresh ten
+     * attempts. A review walked straight past the login limiter that way. Any path segment the
+     * caller chooses does the same thing, and `/api/auth/oidc/:slug/...` has one by design, so the
+     * slug is folded out too: one bucket per IP per ENDPOINT, not per spelling of it.
+     */
+    const rawPath = (req.originalUrl || req.url || req.path).split('?')[0];
+    const normalisedPath = rawPath
+      .replace(/\/{2,}/g, '/')          // collapse doubled separators
+      .replace(/\/+$/, '')              // ignore a trailing slash
+      .toLowerCase()
+      .replace(/^(\/api\/auth\/oidc)\/[^/]+/, '$1')   // the slug is not a distinct endpoint
+      || '/';
+    const key = getClientIp(req) + normalisedPath;
     const now = Date.now();
     const windowStart = now - windowMs;
     let hits = rateLimits.get(key) || [];

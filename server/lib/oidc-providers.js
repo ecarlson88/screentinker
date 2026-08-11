@@ -29,6 +29,14 @@ const DEFAULT_SCOPES = 'openid email profile';
 /** A slug has to be safe in a URL path and in an env var name. */
 const SLUG_RE = /^[a-z0-9][a-z0-9_-]{0,30}$/;
 
+/*
+ * `local` is what users.auth_provider says for a password account, so a provider by that name would
+ * make every federated login look like a password login to the linking rules — and would put a NULL
+ * password_hash on rows that POST /login then feeds straight to bcrypt.compareSync. Reserved rather
+ * than merely discouraged.
+ */
+const RESERVED_SLUGS = new Set(['local', 'recovery']);
+
 function envKey(slug, suffix) {
   return `OIDC_${slug.toUpperCase().replace(/-/g, '_')}_${suffix}`;
 }
@@ -118,7 +126,7 @@ function list(env = process.env) {
   for (const raw of String(env.OIDC_PROVIDERS || '').split(',')) {
     const slug = raw.trim().toLowerCase();
     if (!slug || seen.has(slug)) continue;
-    if (!SLUG_RE.test(slug)) continue;   // ignore rather than crash a boot over a typo
+    if (!SLUG_RE.test(slug) || RESERVED_SLUGS.has(slug)) continue;   // ignore rather than crash a boot over a typo
     const p = fromEnv(env, slug);
     if (p) { out.push(p); seen.add(slug); }
   }
@@ -179,9 +187,29 @@ function rowToProvider(row, secretbox) {
     scopes: row.scopes || DEFAULT_SCOPES,
     source: 'org',
     organizationId: row.organization_id,
-    // Carried so the callback can refuse an assertion outside the domains this customer registered.
-    emailDomains: row.email_domains || '',
+    /*
+     * ⚠️ VERIFIED domains only — never org_sso_providers.email_domains.
+     *
+     * That column is what an admin typed. This is what they PROVED, by publishing a record in the
+     * domain's own DNS, and it is the only thing the login callback may confine an assertion to.
+     * Reading the typed column here would reduce the whole verification feature to a decoration:
+     * a tenant could type any company's domain and immediately assert addresses in it.
+     */
+    emailDomains: verifiedDomainsFor(row.id).join(','),
   };
+}
+
+/** The domains a provider has actually proved it controls. */
+function verifiedDomainsFor(providerId) {
+  const conn = db();
+  if (!conn) return [];
+  try {
+    return conn.prepare('SELECT domain FROM org_sso_domains WHERE provider_id = ? AND verified_at IS NOT NULL')
+      .all(providerId).map((r) => r.domain);
+  } catch (e) {
+    if (/no such table/i.test(e.message)) return [];
+    throw e;
+  }
 }
 
 /** One org provider by its (globally unique) slug, or null. */
@@ -205,6 +233,31 @@ function getOrgProvider(slug) {
 }
 
 /**
+ * Who owns a provider slug — without decrypting anything, and regardless of whether it is enabled.
+ *
+ * The linking rules need to know which ORGANIZATION established an account, not how to talk to its
+ * provider, and asking get() for that has two problems: it fails closed on an undecryptable secret
+ * (right for a login, wrong for an ownership question) and it hides disabled rows, which still own
+ * the accounts they created.
+ *
+ * null means "nothing here owns that slug" — either it never existed or the provider has since been
+ * deleted, and those are deliberately the same answer.
+ */
+function ownerOf(slug) {
+  if (!slug || !SLUG_RE.test(String(slug))) return null;
+  if (list().some((p) => p.slug === slug)) return { source: 'env', organizationId: null };
+  const conn = db();
+  if (!conn) return null;
+  try {
+    const row = conn.prepare('SELECT organization_id FROM org_sso_providers WHERE slug = ?').get(String(slug));
+    return row ? { source: 'org', organizationId: row.organization_id } : null;
+  } catch (e) {
+    if (/no such table/i.test(e.message)) return null;
+    throw e;
+  }
+}
+
+/**
  * Which provider, if any, owns an email address.
  *
  * Domain routing is what makes per-org SSO usable: a customer's staff type their work address and
@@ -222,14 +275,27 @@ function forEmail(email) {
   const domain = String(email).slice(at + 1).toLowerCase().trim();
   if (!domain) return null;
   try {
-    const rows = conn.prepare("SELECT * FROM org_sso_providers WHERE enabled = 1 AND email_domains != '' ORDER BY created_at, id").all();
-    const secretbox = require('./secretbox');
-    for (const row of rows) {
-      const domains = String(row.email_domains || '').split(',').map((d) => d.trim().toLowerCase()).filter(Boolean);
-      if (domains.includes(domain)) return rowToProvider(row, secretbox);
-    }
-  } catch { /* table not migrated yet */ }
+    /*
+     * Routing is driven by the VERIFIED domain table, not by the text an admin typed, and the join
+     * is what enforces it — an unverified claim cannot send anyone anywhere. Ordering by the
+     * verification time makes the winner of any residual tie the one who PROVED it first, rather
+     * than whichever row a table scan reached.
+     */
+    const row = conn.prepare(`
+      SELECT p.* FROM org_sso_domains d
+      JOIN org_sso_providers p ON p.id = d.provider_id
+      WHERE d.domain = ? AND d.verified_at IS NOT NULL AND p.enabled = 1
+      ORDER BY d.verified_at, d.id
+      LIMIT 1
+    `).get(domain);
+    if (row) return rowToProvider(row, require('./secretbox'));
+  } catch (e) {
+    // Only a missing table is a null — anything else (a secret that will not decrypt, a schema
+    // drift) must surface rather than silently answering "this domain has no SSO", which is how a
+    // fail-closed guarantee turns back into a fail-open one.
+    if (!/no such table/i.test(e.message)) throw e;
+  }
   return null;
 }
 
-module.exports = { list, get, publicList, getOrgProvider, forEmail, DEFAULT_SCOPES, SLUG_RE };
+module.exports = { list, get, publicList, getOrgProvider, ownerOf, forEmail, DEFAULT_SCOPES, SLUG_RE };

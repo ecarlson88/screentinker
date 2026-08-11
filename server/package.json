@@ -17,7 +17,6 @@
     "cors": "^2.8.5",
     "express": "^4.18.2",
     "express-rate-limit": "^8.3.1",
-    "google-auth-library": "^10.6.2",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
     "multer": "^1.4.5-lts.1",
@@ -32,7 +31,7 @@
   },
   "devDependencies": {
     "js-yaml": "^4.2.0",
-    "socket.io-client": "^4.8.3",
-    "puppeteer-core": "^24.43.1"
+    "puppeteer-core": "^24.43.1",
+    "socket.io-client": "^4.8.3"
   }
 }

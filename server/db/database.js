@@ -430,6 +430,40 @@ const migrations = [
     FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
   )`,
   "CREATE INDEX IF NOT EXISTS idx_org_sso_org ON org_sso_providers(organization_id)",
+  /*
+   * Claimed sign-in domains, and the proof that the claimant controls them.
+   *
+   * `org_sso_providers.email_domains` used to be the whole story, and first-claim-wins on a text
+   * field is not a claim — it is a land grab. A tenant could type a domain it had nothing to do
+   * with and every person at that company typing their work address into the login page would be
+   * routed to the squatter's identity provider. It also let one account permanently deny a domain
+   * to its real owner, and strand accounts at addresses it never owned.
+   *
+   * So a domain is inert until DNS says otherwise. `verified_at` NULL means claimed but unproven:
+   * it routes nobody, and the login callback will not accept an assertion for it. The row still
+   * reserves the name, so two tenants cannot race the same domain, but reserving is all it does.
+   *
+   * `token` is what has to appear in DNS. It is per-domain rather than per-organization so that
+   * publishing one proof cannot be replayed to claim a second domain.
+   */
+  `CREATE TABLE IF NOT EXISTS org_sso_domains (
+    id                 TEXT PRIMARY KEY,
+    organization_id    TEXT NOT NULL,
+    provider_id        TEXT,
+    domain             TEXT NOT NULL UNIQUE,
+    token              TEXT NOT NULL,
+    -- When the current token was issued. An UNVERIFIED claim is only good for 8 hours from here:
+    -- past that the token is dead and the reservation lapses, so a domain nobody can prove cannot
+    -- be held indefinitely by whoever typed it first. Verified rows ignore this entirely.
+    token_issued_at    INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    verified_at        INTEGER,
+    last_checked_at    INTEGER,
+    last_error         TEXT,
+    created_at         INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
+  )`,
+  "CREATE INDEX IF NOT EXISTS idx_org_sso_domains_org ON org_sso_domains(organization_id)",
+  "CREATE INDEX IF NOT EXISTS idx_org_sso_domains_provider ON org_sso_domains(provider_id)",
   "ALTER TABLE device_telemetry ADD COLUMN attached_display TEXT",
   "ALTER TABLE device_telemetry ADD COLUMN video_mode TEXT",
   // Panel temperature in Celsius. REAL because the sensor reports fractions, and nullable because

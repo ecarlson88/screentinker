@@ -151,6 +151,16 @@ export default {
   'sso.disable': 'Disable',
   'sso.disabled': 'disabled',
   'sso.domains_label': 'Email domains',
+  'sso.domains_heading': 'Sign-in domains',
+  'sso.domain_verified': 'verified',
+  'sso.domain_pending': 'not verified — routes nobody yet',
+  'sso.unverified_warning': 'Some domains are not verified yet, so nobody is routed to this provider by email address.',
+  'sso.verify_now': 'Verify',
+  'sso.verifying': 'Checking DNS…',
+  'sso.verify_failed': 'Could not verify that domain.',
+  'sso.domain_verified_toast': '{domain} is verified.',
+  'sso.dns_instructions': 'Publish ONE of these records in this domain\u2019s DNS, then click Verify. Claims expire after 8 hours.',
+  'sso.dns_or_cname': 'or, if your DNS will not take a TXT record there:',
   'sso.callback_label': 'Redirect URI — add this to your provider',
   'sso.f_name': 'Display name',
   'sso.f_issuer': 'Issuer URL',
@@ -187,6 +197,10 @@ export default {
   'auth.sso_err_account_exists_local': 'An account with this email already exists. Sign in with your password, then link your provider in Settings.',
   'auth.sso_err_subject_mismatch': 'This email is already linked to a different account at your provider.',
   'auth.sso_err_server_error': 'Something went wrong completing sign-in.',
+  // Both of these used to fall through to "please try again", which is advice that can never work:
+  // retrying is exactly what will not help, and the user needs to be told who to talk to instead.
+  'auth.sso_err_domain_not_allowed': 'Your organization has not verified that email domain for sign-in. Ask your administrator to verify it in ScreenTinker.',
+  'auth.sso_err_account_exists_other_provider': 'An account with this email already exists and signs in through a different provider. Use that provider, or ask your administrator.',
   'auth.signin_microsoft': 'Sign in with Microsoft',
   'auth.back_to_signin': 'Back to Sign In',
   // TOTP 2FA challenge (second login step)

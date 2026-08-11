@@ -278,12 +278,80 @@ router.post('/resend-verification', (req, res) => {
 // would turn "read one email" into a full session and quietly bypass MFA.
 const RESET_GENERIC_OK = { ok: true, message: 'If that address has an account, a reset link is on its way.' };
 
+/*
+ * An account whose identity provider no longer exists — and why it may reset a password.
+ *
+ * A federated row normally must NOT be resettable: the identity provider owns that account, and
+ * offering a password would be a way around it. But a provider can be deleted, and the row it
+ * created outlives it, pointing at a slug nothing answers to. Such an account cannot log in by any
+ * route: no provider to authenticate against, no password to reset, and registration refuses the
+ * address as taken.
+ *
+ * That is not only an accident. A tenant can claim a domain it does not own (claims are not yet
+ * verified — see the README), sign in as an address there, delete its provider, and leave the real
+ * owner permanently unable to reach an account bearing their own address.
+ *
+ * Proving control of the MAILBOX is the right way out, and it is strictly stronger evidence than
+ * the identity-provider assertion that created the row. So an orphaned account may reset, and doing
+ * so returns it to a local account. A row whose provider still exists is untouched by this.
+ */
+/*
+ * What an identity provider is allowed to call an email address.
+ *
+ * Exactly one @, no whitespace, no control characters, a domain with at least one dot. Deliberately
+ * stricter than the RFC — this is not validating what may exist in the world, it is deciding what
+ * this system will key an ACCOUNT on, and every exotic form is a way for two spellings to look like
+ * one address to a human and two to the database.
+ */
+const ASSERTED_EMAIL_RE = /^[^\s@\x00-\x1f]+@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+
+/**
+ * May this provider speak for this address?
+ *
+ * A pure function on purpose: the confinement it implements is the single control standing between
+ * per-organization SSO and an account-takeover primitive, and a control that can only be exercised
+ * by standing up a hostile identity provider is a control that does not get tested. It was in fact
+ * shipped untested once — the test named after it asserted only that a provider row carried two
+ * fields, and passed with the guard deleted.
+ *
+ * `provider.emailDomains` is the VERIFIED set (see rowToProvider), so this cannot be satisfied by a
+ * domain the tenant merely typed.
+ */
+function emailAllowedForProvider(provider, email) {
+  // Instance-wide providers are the operator's own choice and keep the trust they have always had.
+  if (!provider.organizationId) return true;
+  const addr = String(email || '').toLowerCase();
+  /*
+   * Malformed addresses are refused rather than tidied. `victim@evil.test@acme.test\n` used to pass
+   * — lastIndexOf('@') took `acme.test\n`, and trimming turned it into an allowed domain — so an
+   * address that is not one thing got treated as belonging to a domain it only ended with. Anything
+   * carrying whitespace, control characters or a second @ is not an address this will reason about.
+   */
+  if (!ASSERTED_EMAIL_RE.test(addr)) return false;
+  const at = addr.lastIndexOf('@');
+  if (at === -1) return false;
+  const domain = addr.slice(at + 1).trim();
+  if (!domain) return false;
+  // Lowercased on both sides: forEmail lowercases when routing, and a row that differed in case
+  // would otherwise route a user in and then reject them at the callback.
+  const allowed = String(provider.emailDomains || '').split(',').map((d) => d.trim().toLowerCase()).filter(Boolean);
+  return allowed.includes(domain);
+}
+
+function isOrphanedFederated(user) {
+  if (!user || user.auth_provider === 'local') return false;
+  return !oidcProviders.ownerOf(user.auth_provider);
+}
+
 router.post('/forgot-password', (req, res) => {
   const email = String(req.body?.email || '').toLowerCase().trim();
   // Respond identically no matter what happens below.
   try {
     if (email) {
-      const user = db.prepare("SELECT * FROM users WHERE email = ? AND auth_provider = 'local'").get(email);
+      const candidate = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+      // A local account, or one stranded by a deleted provider — see isOrphanedFederated above.
+      const user = candidate && (candidate.auth_provider === 'local' || isOrphanedFederated(candidate))
+        ? candidate : null;
       if (user) {
         if (!emailSvc.isConfigured()) {
           // Loud, because the user will wait for an email that can never arrive and the
@@ -313,7 +381,17 @@ router.post('/reset-password', (req, res) => {
   // Someone who locked themselves out guessing must not stay locked out after proving
   // control of the mailbox and choosing a new password.
   loginLockout.reset(userId);
-  const u = db.prepare('SELECT email FROM users WHERE id = ?').get(userId);
+  const u = db.prepare('SELECT email, auth_provider FROM users WHERE id = ?').get(userId);
+  /*
+   * Return a stranded federated row to a local account. Without this the reset would "succeed" and
+   * change nothing anyone can use: POST /login only ever looks at auth_provider = 'local', so the
+   * new password would be unreachable and the account still lost.
+   */
+  if (isOrphanedFederated(u)) {
+    db.prepare("UPDATE users SET auth_provider = 'local', provider_id = NULL WHERE id = ?").run(userId);
+    console.log(`[password-reset] ${u.email} reclaimed from deleted provider ${u.auth_provider}`);
+    logActivity(userId, 'auth:federated_account_reclaimed', `was ${u.auth_provider}`, null, getClientIp(req));
+  }
   logActivity(userId, 'auth:password_reset_completed', null, null, getClientIp(req));
   console.log(`[password-reset] password changed for ${u ? u.email : userId}`);
   // No session on purpose — see above.
@@ -365,7 +443,7 @@ router.get('/totp/status', requireAuth, (req, res) => {
 // Step 1: mint a pending secret + return the otpauth:// URI + a ready-to-render QR
 // data URL (drawn server-side with the already-bundled `qrcode` lib, same as the
 // device-owner provisioning QR). The raw secret is also returned for manual entry.
-router.post('/totp/setup', requireAuth, async (req, res) => {
+router.post('/totp/setup', requireAuth, asyncRoute(async (req, res) => {
   const u = db.prepare('SELECT auth_provider, totp_enabled, email FROM users WHERE id = ?').get(req.user.id);
   if (u.auth_provider !== 'local') return res.status(400).json({ error: 'TOTP is only for password accounts; your identity provider manages MFA.' });
   if (u.totp_enabled) return res.status(409).json({ error: 'TOTP already enabled. Disable it first to re-enroll.' });
@@ -382,7 +460,7 @@ router.post('/totp/setup', requireAuth, async (req, res) => {
   try { qr_data_url = await QRCode.toDataURL(otpauth_uri, { errorCorrectionLevel: 'M', margin: 1, width: 240 }); }
   catch (e) { /* fall through with qr_data_url = null */ }
   res.json({ otpauth_uri, secret, qr_data_url });
-});
+}));
 
 // Step 2: confirm a code from the user's app, THEN enable + issue recovery codes (once).
 router.post('/totp/enable', requireAuth, (req, res) => {
@@ -851,9 +929,37 @@ function readCookie(req, name) {
   for (const part of raw.split(';')) {
     const eq = part.indexOf('=');
     if (eq === -1) continue;
-    if (part.slice(0, eq).trim() === name) return decodeURIComponent(part.slice(eq + 1).trim());
+    if (part.slice(0, eq).trim() !== name) continue;
+    const value = part.slice(eq + 1).trim();
+    /*
+     * ⚠️ decodeURIComponent THROWS on a malformed escape — `Cookie: st_oidc_tx=%` is a URIError.
+     * Anyone can send that, and this function is called before the handler's try block, so the
+     * throw used to reach the async boundary and take the process down (see asyncRoute below).
+     * A cookie we cannot decode is a cookie we do not have.
+     */
+    try { return decodeURIComponent(value); } catch { return null; }
   }
   return null;
+}
+
+/*
+ * Wrap an async handler so a rejection becomes a 500 instead of killing the server.
+ *
+ * Express 4 does not await handlers, so an async one that throws produces an unhandled rejection,
+ * and server.js turns that into process.exit(1) — one malformed request, one dead instance, on a
+ * restart loop. This has now bitten three separate times on these routes (a state comparison, a
+ * cookie decode, a provider whose secret would not decrypt), each time because something threw
+ * OUTSIDE the handler's own try block. Fixing the individual throws does not fix the shape, so
+ * every async route here goes through this instead.
+ */
+function asyncRoute(handler) {
+  return (req, res, next) => Promise.resolve(handler(req, res, next)).catch((err) => {
+    console.error(`[auth] unhandled error in ${req.method} ${req.path}:`, err && err.message);
+    if (res.headersSent) return;
+    // These two routes are browser redirects, not API calls; a JSON body would be shown as text.
+    if (req.path.startsWith('/oidc/')) return backToApp(res, { sso_error: 'server_error' });
+    res.status(500).json({ error: 'Something went wrong' });
+  });
 }
 
 /*
@@ -917,7 +1023,7 @@ router.post('/sso/start', express.urlencoded({ extended: false }), (req, res) =>
   res.redirect(`/api/auth/oidc/${encodeURIComponent(provider.slug)}/start`);
 });
 
-router.get('/oidc/:slug/start', async (req, res) => {
+router.get('/oidc/:slug/start', asyncRoute(async (req, res) => {
   const provider = oidcProviders.get(req.params.slug);
   if (!provider) return backToApp(res, { sso_error: 'unknown_provider' });
 
@@ -956,9 +1062,9 @@ router.get('/oidc/:slug/start', async (req, res) => {
     console.error(`[oidc] ${req.params.slug} start failed:`, err.message);
     backToApp(res, { sso_error: 'provider_unavailable' });
   }
-});
+}));
 
-router.get('/oidc/:slug/callback', async (req, res) => {
+router.get('/oidc/:slug/callback', asyncRoute(async (req, res) => {
   const provider = oidcProviders.get(req.params.slug);
   if (!provider) return backToApp(res, { sso_error: 'unknown_provider' });
 
@@ -1036,17 +1142,12 @@ router.get('/oidc/:slug/callback', async (req, res) => {
    * always had. An org provider is chosen by a customer, so it is confined to the domains that
    * customer registered — and a domain cannot be registered while another organization holds it.
    *
-   * ⚠️ This bounds the damage to domains a tenant claimed; it does NOT prove they own them.
-   * Claiming an unheld public domain is still possible and needs DNS verification. See the README.
+   * The domains are the VERIFIED ones — proved by a DNS record published in the domain itself — so
+   * this is confinement to what the tenant demonstrably controls, not to what they typed.
    */
-  if (provider.organizationId) {
-    const at = email.lastIndexOf('@');
-    const domain = at === -1 ? '' : email.slice(at + 1);
-    const allowed = String(provider.emailDomains || '').split(',').map((d) => d.trim()).filter(Boolean);
-    if (!domain || !allowed.includes(domain)) {
-      console.warn(`[oidc] ${provider.slug} asserted ${email}, outside its domains [${allowed.join(', ')}]`);
-      return backToApp(res, { sso_error: 'domain_not_allowed' });
-    }
+  if (!emailAllowedForProvider(provider, email)) {
+    console.warn(`[oidc] ${provider.slug} asserted ${email}, outside its verified domains [${provider.emailDomains}]`);
+    return backToApp(res, { sso_error: 'domain_not_allowed' });
   }
   /*
    * An unverified email is refused. The whole account model keys on email — linking, invites,
@@ -1080,7 +1181,9 @@ router.get('/oidc/:slug/callback', async (req, res) => {
       if (!already) {
         db.prepare("INSERT INTO organization_members (organization_id, user_id, role) VALUES (?, ?, 'org_member')")
           .run(provider.organizationId, user.id);
-        logActivity(user.id, 'org_sso_joined', `via ${provider.name}`, provider.organizationId, getClientIp(req));
+        // (userId, action, details, deviceId, ipAddress, workspaceId) — the org id is NOT the 4th
+        // arg; it was landing in device_id, which has no FK to catch it.
+        logActivity(user.id, 'org_sso_joined', `via ${provider.name} org=${provider.organizationId}`, null, getClientIp(req));
       }
     }
 
@@ -1101,7 +1204,19 @@ router.get('/oidc/:slug/callback', async (req, res) => {
      * page exchanges it at /sso/claim. A link cannot forge that cookie, so a token can only be
      * claimed by the browser that actually completed the login.
      */
-    res.cookie(SSO_CLAIM_COOKIE, token, {
+    /*
+     * The cookie carries a CLAIM token, not the session token itself. Two reasons, both learned:
+     * every token here is signed with the same secret, so a token minted for another purpose (a
+     * pre-TOTP `mfa_pending` one, say) was accepted by /sso/claim and returned the full user row;
+     * and the session token lives for days, so a copy of it sitting in a Set-Cookie header is worth
+     * stealing long after the login. This wrapper is good for 120 seconds and for nothing else.
+     */
+    const claimToken = jwt.sign(
+      { typ: 'sso-claim', tok: token, wsp: workspaceId || null },
+      config.jwtSecret,
+      { algorithm: 'HS256', expiresIn: 120 },
+    );
+    res.cookie(SSO_CLAIM_COOKIE, claimToken, {
       httpOnly: true,
       sameSite: 'lax',
       secure: req.protocol === 'https',
@@ -1113,13 +1228,17 @@ router.get('/oidc/:slug/callback', async (req, res) => {
     console.error(`[oidc] ${provider.slug} sign-in failed:`, err.message);
     backToApp(res, { sso_error: 'server_error' });
   }
-});
+}));
 
 /*
  * Exchange the one-shot cookie for the session token.
  *
- * POST so it cannot be triggered by a link or an <img>, and the cookie is cleared on the way out so
- * a second attempt gets nothing — a token that leaks from a log or a back button is already spent.
+ * POST so it cannot be triggered by a link or an <img>, and the cookie is cleared on the way out.
+ *
+ * ⚠️ Clearing a cookie asks the BROWSER to forget it; it does not invalidate anything. What bounds
+ * a leaked copy is the claim token's own 120-second expiry, which is why the session token is
+ * wrapped rather than handed over directly. Do not restore the comment that used to claim this was
+ * "already spent" — it was not, and a review demonstrated the same cookie claiming twice.
  */
 router.post('/sso/claim', (req, res) => {
   const token = readCookie(req, SSO_CLAIM_COOKIE);
@@ -1128,15 +1247,27 @@ router.post('/sso/claim', (req, res) => {
 
   let claims;
   try {
-    claims = jwt.verify(token, config.jwtSecret);
+    // Pinned algorithm and an explicit `typ`: two token kinds signed with one secret must never be
+    // interchangeable, and this endpoint accepted anything the secret had touched.
+    claims = jwt.verify(token, config.jwtSecret, { algorithms: ['HS256'] });
   } catch {
     return res.status(401).json({ error: 'That sign-in has expired' });
   }
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(claims.id);
+  if (claims.typ !== 'sso-claim' || !claims.tok) {
+    return res.status(401).json({ error: 'That sign-in has expired' });
+  }
+
+  let session;
+  try {
+    session = jwt.verify(claims.tok, config.jwtSecret, { algorithms: ['HS256'] });
+  } catch {
+    return res.status(401).json({ error: 'That sign-in has expired' });
+  }
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(session.id);
   if (!user) return res.status(401).json({ error: 'That sign-in has expired' });
 
   const { password_hash, totp_secret_enc, totp_last_step, ...safeUser } = user;
-  res.json({ token, user: safeUser, current_workspace_id: claims.current_workspace_id || null });
+  res.json({ token: claims.tok, user: safeUser, current_workspace_id: claims.wsp || null });
 });
 
 /*
@@ -1175,8 +1306,28 @@ function upsertFederatedUser({ claims, email, provider, req }) {
      * one. An ORG provider therefore never adopts an account another provider established; the user
      * links it deliberately instead.
      */
-    if (provider.organizationId && existing.auth_provider && existing.auth_provider !== 'local') {
-      return { error: 'account_exists_other_provider' };
+    if (provider.organizationId) {
+      /*
+       * `existing.auth_provider && … !== 'local'` failed OPEN on an empty string, and compared
+       * SLUGS, which got the two interesting cases backwards:
+       *
+       *   - a customer replacing their identity provider (or an admin who deleted one and made
+       *     another) got a new random slug, so their own org could no longer sign its own people in
+       *     — every SSO account in the tenant bricked, with no recovery route;
+       *   - meanwhile an account owned by a DELETED provider looked adoptable to everyone.
+       *
+       * Ownership is therefore asked of the ORGANIZATION behind the slug, and the only states an
+       * org provider may take over are its own org's, and `local` with no password — an invited
+       * user who has not set one yet, which is a real and wanted case.
+       *
+       * An account established by a provider that no longer exists is deliberately NOT adoptable:
+       * see the squatting note in the callback. It is recovered by proving control of the email
+       * through password reset, not by another identity provider asserting it.
+       */
+      const owner = oidcProviders.ownerOf(existing.auth_provider);
+      const sameOrg = !!(owner && owner.organizationId && owner.organizationId === provider.organizationId);
+      const neverFederated = existing.auth_provider === 'local';
+      if (!sameOrg && !neverFederated) return { error: 'account_exists_other_provider' };
     }
     db.prepare('UPDATE users SET auth_provider = ?, provider_id = ?, avatar_url = ? WHERE id = ?')
       .run(provider.slug, String(claims.sub), claims.picture || existing.avatar_url, existing.id);
@@ -1199,3 +1350,8 @@ function upsertFederatedUser({ claims, email, provider, req }) {
 
 
 module.exports = router;
+// Exported for tests: these two carry the security decisions of the SSO flow, and testing them
+// through a live identity provider only is how they shipped unverified the first time.
+module.exports.emailAllowedForProvider = emailAllowedForProvider;
+module.exports.upsertFederatedUser = upsertFederatedUser;
+module.exports.isOrphanedFederated = isOrphanedFederated;

@@ -25,6 +25,7 @@
  */
 
 const crypto = require('crypto');
+const net = require('net');
 const jwt = require('jsonwebtoken');
 
 /*
@@ -52,21 +53,78 @@ const jwksCache = new Map();       // jwks_uri -> { at, keys }
  * Two rules, both cheap:
  *   https only        — an http:// target is a plaintext credential leak as well as a way to reach
  *                       services that never expected a request from inside the network.
- *   public hosts only — loopback, RFC1918, link-local (169.254.169.254 is cloud metadata) and the
- *                       IPv6 equivalents are refused outright.
+ *   public hosts only — loopback, RFC1918, CGNAT, link-local (169.254.169.254 is cloud metadata),
+ *                       multicast and reserved ranges, in BOTH address families, including the
+ *                       IPv4-mapped IPv6 forms that a prefix match misses.
  *
  * ⚠️ This is a literal-address check, not full SSRF protection: a hostname that RESOLVES to a
  * private address still passes, because refusing that needs resolve-then-pin plumbing that Node's
- * fetch does not expose. It raises the bar from "type an internal URL" to "control public DNS",
- * and the README says so rather than implying more.
+ * fetch does not expose. It raises the bar from "type an internal URL" to "control public DNS".
+ * README.md documents this limitation under per-organization SSO.
  */
-const BLOCKED_HOST = /^(localhost|.*\.localhost|127\.|0\.0\.0\.0|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?|\[?f[cd])/i;
+/*
+ * Addresses are parsed as ADDRESSES and compared by range. This started life as a prefix regex,
+ * which was wrong in both directions: it missed `[::ffff:127.0.0.1]` — the entire IPv4 space
+ * re-encoded, which WHATWG URL normalises to `[::ffff:7f00:1]` so no dotted-quad prefix can match,
+ * and a review reached a loopback service straight through it — while also matching plain TEXT, so
+ * every hostname beginning "fc" or "fd" was refused (fcm.googleapis.com, fcps.edu).
+ */
+const BLOCKED_V4 = [
+  ['0.0.0.0', 8],          // "this network"
+  ['10.0.0.0', 8],         // RFC1918
+  ['100.64.0.0', 10],      // CGNAT / Tailscale
+  ['127.0.0.0', 8],        // loopback
+  ['169.254.0.0', 16],     // link-local — 169.254.169.254 is cloud metadata
+  ['172.16.0.0', 12],      // RFC1918
+  ['192.0.0.0', 24],       // IETF protocol assignments
+  ['192.168.0.0', 16],     // RFC1918
+  ['198.18.0.0', 15],      // benchmarking
+  ['224.0.0.0', 4],        // multicast
+  ['240.0.0.0', 4],        // reserved
+];
+
+const v4ToInt = (ip) => ip.split('.').reduce((acc, o) => (acc * 256) + Number(o), 0);
+
+function isBlockedV4(ip) {
+  const addr = v4ToInt(ip);
+  return BLOCKED_V4.some(([base, bits]) => {
+    const mask = bits === 0 ? 0 : (-1 << (32 - bits)) >>> 0;
+    return (addr & mask) >>> 0 === (v4ToInt(base) & mask) >>> 0;
+  });
+}
+
+function isBlockedV6(ip) {
+  const low = ip.toLowerCase();
+  // An IPv4-mapped or IPv4-compatible address is an IPv4 address wearing a hat — judge the IPv4.
+  const mapped = low.match(/^::(ffff:)?(\d+\.\d+\.\d+\.\d+)$/)
+    || low.match(/^::(ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (mapped) {
+    if (mapped[2] && mapped[2].includes('.')) return isBlockedV4(mapped[2]);
+    const hi = parseInt(mapped[2], 16), lo = parseInt(mapped[3], 16);
+    return isBlockedV4([hi >> 8, hi & 0xff, lo >> 8, lo & 0xff].join('.'));
+  }
+  if (low === '::' || low === '::1') return true;              // unspecified (= loopback on Linux), loopback
+  if (/^f[cd]/.test(low)) return true;                          // fc00::/7 unique-local
+  if (/^fe[89ab]/.test(low)) return true;                       // fe80::/10 link-local
+  if (/^ff/.test(low)) return true;                             // multicast
+  return false;
+}
 
 function assertFetchable(url) {
   let u;
   try { u = new URL(url); } catch { throw new Error(`not a URL: ${url}`); }
   if (u.protocol !== 'https:') throw new Error('provider URLs must use https');
-  if (BLOCKED_HOST.test(u.hostname)) throw new Error('provider host is not publicly routable');
+
+  const host = u.hostname;
+  // URL keeps IPv6 literals in brackets; net.isIP does not want them.
+  const bare = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+  const family = net.isIP(bare);
+
+  const blocked = family === 4 ? isBlockedV4(bare)
+    : family === 6 ? isBlockedV6(bare)
+      : /^(localhost|.*\.localhost)$/i.test(host);
+
+  if (blocked) throw new Error('provider host is not publicly routable');
   return u;
 }
 
@@ -257,6 +315,7 @@ async function fetchJwks(jwksUri) {
 
 module.exports = {
   discover,
+  assertFetchable,
   fetchJwks,
   verifyIdToken,
   exchangeCode,

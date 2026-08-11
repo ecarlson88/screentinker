@@ -702,6 +702,9 @@ export async function render(container) {
             ${p.enabled ? '' : `<span style="font-size:11px;color:var(--text-muted)"> — ${esc(t('sso.disabled'))}</span>`}
             <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${esc(p.issuer)}</div>
             <div style="font-size:12px;color:var(--text-muted)">${esc(t('sso.domains_label'))}: ${esc(p.email_domains || '—')}</div>
+            ${(p.domains || []).some((d) => !d.verified)
+              ? `<div style="font-size:12px;color:var(--warning,#b45309);margin-top:2px">⚠️ ${esc(t('sso.unverified_warning'))}</div>`
+              : ''}
           </div>
           <div style="display:flex;gap:6px;flex-shrink:0">
             <button class="btn btn-secondary btn-sm" data-sso-test="${esc(p.id)}">${esc(t('sso.test'))}</button>
@@ -721,6 +724,32 @@ export async function render(container) {
 
         <!-- Editing is per provider, because an organization may have several (one per domain, or
              one per identity provider after a merger) and they are configured independently. -->
+        <!-- Domain proof. A claimed domain routes NOBODY until DNS confirms the organization
+             controls it, so the state of each one is shown plainly rather than left to be inferred
+             from a login that silently does not work. -->
+        ${(p.domains || []).length ? `
+        <div style="margin-top:10px;font-size:12px">
+          <div style="color:var(--text-muted);margin-bottom:4px">${esc(t('sso.domains_heading'))}</div>
+          ${p.domains.map((d) => `
+            <div style="border:1px solid var(--border);border-radius:4px;padding:8px;margin-bottom:6px">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+                <div><strong>${esc(d.domain)}</strong>
+                  ${d.verified
+                    ? `<span style="color:var(--success,#15803d)"> — ${esc(t('sso.domain_verified'))}</span>`
+                    : `<span style="color:var(--warning,#b45309)"> — ${esc(t('sso.domain_pending'))}</span>`}
+                </div>
+                ${d.verified ? '' : `<button class="btn btn-secondary btn-sm" data-sso-verify="${esc(p.id)}" data-domain="${esc(d.domain)}">${esc(t('sso.verify_now'))}</button>`}
+              </div>
+              ${d.verified ? '' : `
+                <div style="margin-top:6px;color:var(--text-muted)">${esc(t('sso.dns_instructions'))}</div>
+                <code style="display:block;word-break:break-all;padding:6px;background:var(--bg-secondary);border-radius:4px;margin-top:4px">${esc(d.record_name)}  TXT  ${esc(d.txt_value)}</code>
+                <div style="margin-top:4px;color:var(--text-muted)">${esc(t('sso.dns_or_cname'))}</div>
+                <code style="display:block;word-break:break-all;padding:6px;background:var(--bg-secondary);border-radius:4px;margin-top:4px">${esc(d.record_name)}  CNAME  ${esc(d.cname_value)}</code>
+                ${d.last_error ? `<div style="margin-top:4px;color:var(--danger,#b91c1c)">${esc(d.last_error)}</div>` : ''}`}
+              <div id="ssoVerify-${esc(p.id)}-${esc(d.domain.replace(/[^a-z0-9]/g, '-'))}" style="margin-top:4px"></div>
+            </div>`).join('')}
+        </div>` : ''}
+
         <div id="ssoTest-${esc(p.id)}" style="display:none;margin-top:8px;font-size:12px"></div>
         <div id="ssoEdit-${esc(p.id)}" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:none">
           <div style="display:grid;gap:10px;max-width:560px">
@@ -755,6 +784,44 @@ export async function render(container) {
     listEl.querySelectorAll('[data-sso-toggle]').forEach((btn) => {
       btn.addEventListener('click', async () => {
         await ssoRequest('PUT', `/${btn.dataset.ssoToggle}`, { enabled: btn.dataset.enabled !== '1' });
+      });
+    });
+    /*
+     * Ask the server to look for the DNS record now. Pull-based on purpose: the admin has just
+     * edited DNS and wants an answer, and a failure has to say WHICH failure — not published yet,
+     * published wrong, or the claim expired and the record has changed underneath them.
+     */
+    listEl.querySelectorAll('[data-sso-verify]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.ssoVerify;
+        const domain = btn.dataset.domain;
+        const out = document.getElementById(`ssoVerify-${id}-${domain.replace(/[^a-z0-9]/g, '-')}`);
+        btn.disabled = true;
+        if (out) out.textContent = t('sso.verifying');
+        try {
+          const res = await fetch(`/api/organizations/${orgId}/sso/${id}/domains/${encodeURIComponent(domain)}/verify`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+          });
+          const body = await res.json().catch(() => ({}));
+          if (body.ok) {
+            showToast(t('sso.domain_verified_toast', { domain }), 'success');
+            await load();          // re-render: the domain now routes, and the card must say so
+            return;
+          }
+          // An expired claim has already been reissued server-side, so the records on screen are
+          // stale — reload rather than leaving the admin publishing a value that no longer matches.
+          if (body.expired) {
+            showToast(body.error || t('sso.verify_failed'), 'error');
+            await load();
+            return;
+          }
+          if (out) out.textContent = body.error || t('sso.verify_failed');
+        } catch {
+          if (out) out.textContent = t('sso.verify_failed');
+        } finally {
+          btn.disabled = false;
+        }
       });
     });
     listEl.querySelectorAll('[data-sso-test]').forEach((btn) => {

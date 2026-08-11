@@ -404,10 +404,10 @@ https://yourdomain.com/api/auth/oidc/<generated-slug>/callback
 The slug is generated rather than chosen so two customers cannot collide on — or guess — each
 other's. A domain may be claimed by only one organization; a second claim is refused.
 
-⚠️ **A provider may only authenticate emails inside the domains it registered.** An organization
+⚠️ **A provider may only authenticate emails inside the domains it has VERIFIED.** An organization
 supplies its own issuer and client ID, so it controls that identity provider completely and could
 otherwise assert any address at all — including another company's, or an administrator's. Confining
-assertions to registered domains is what makes customer-configurable SSO safe to offer.
+assertions to verified domains is what makes customer-configurable SSO safe to offer.
 
 ⚠️ **Public email providers cannot be claimed.** `gmail.com`, `outlook.com`, `yahoo.com`, `icloud.com`
 and the rest of the consumer mailboxes are refused (`server/lib/public-email-domains.js`). Claiming
@@ -415,10 +415,34 @@ one would offer every Gmail user a "sign in with your organization" button point
 infrastructure — phishing launched from this product's own login page — and would let one account
 deny a public domain to everyone else.
 
-⚠️ **Domain ownership is not yet verified.** A claimed domain currently means "no other organization
-had claimed it", not "this organization owns it". The blocklist above removes the mass-abuse case,
-but proof of control — a DNS TXT record, or a challenge to `postmaster@` — is still the missing
-control, and until it exists a domain claim should be treated as a support-reviewable action.
+### Proving a domain
+
+A claimed domain **routes nobody and authenticates nobody until DNS proves the organization controls
+it.** Typing a domain into a form reserves the name and nothing more.
+
+Publish either record — whichever the domain's DNS will accept — then press **Verify**:
+
+```
+_screentinker-verify.example.com.  IN  TXT    "st-verify=<token>"
+_screentinker-verify.example.com.  IN  CNAME  <token>.verify.screentinker.com.
+```
+
+The token is unique per domain, so publishing one proof cannot be replayed to claim a second. A
+dedicated `_`-prefixed name is used rather than the apex, where a careless edit would sit alongside
+SPF and DMARC and break mail.
+
+**An unverified claim lapses after 8 hours**, and lapsing rotates the token. This is what stops
+squatting: a tenant cannot type a company's domain and hold it against the real owner, and a record
+left in DNS from an abandoned attempt cannot satisfy a later claim. A verified domain never expires —
+re-proving on a timer would log a customer out over a DNS edit made months afterwards.
+
+Platform admins are emailed whenever a domain is claimed. Verification is what makes an unowned
+claim worthless; the notification is what makes an attempt visible. Nothing is ever sent to the
+claimed domain itself — that would let any tenant make this product email third parties.
+
+⚠️ **Instance-wide providers are exempt from all of the above.** `GOOGLE_CLIENT_ID`, `OIDC_*` and
+friends are the operator's own configuration, are not domain-restricted, and require no verification.
+Domain proof exists because per-organization providers are supplied by CUSTOMERS.
 
 Signing in through an organization's provider makes the user a member of that organization
 (`org_member`). Existing members keep whatever role they already have — logging in never promotes or
