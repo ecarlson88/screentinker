@@ -1230,11 +1230,17 @@ Turning this off re-enables allow-same-origin. Widget HTML will then run with
 the same privileges as ScreenTinker itself. Any script in any widget in this
 organization will be able to:
 
-  - Read the session token of every logged-in user who views a display or
-    preview
+  - Read the device token of every display that shows the widget, and act as
+    that display against the ScreenTinker API
+  - Read the session token of any logged-in user who opens a display in their
+    own browser
   - Call the ScreenTinker API as that user, including admin actions
   - Read and modify content on every other display in this organization
   - Silently exfiltrate all of the above to any server it likes
+
+The widget editor's Preview is NOT affected: it renders inside the dashboard,
+where your session lives, so it stays isolated whatever this setting says. A
+widget may therefore behave differently in Preview than on a display.
 
 Because allow-scripts is also required for widgets to function, a widget can
 remove its own sandbox entirely once same-origin is granted. There is no
