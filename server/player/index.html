@@ -3291,6 +3291,12 @@
       pendingWidgetSwap = null;
     }
 
+    function widgetSandboxAttr(item) {
+      return item && item.widget_allow_same_origin
+        ? 'allow-scripts allow-same-origin'
+        : 'allow-scripts';
+    }
+
     // Buffered widget render (#directory-board black-cycle): build the new widget iframe
     // BEHIND the current content (hidden) and reveal it only once it fires 'load' — then tear
     // down the outgoing content. Kills the black flash on every widget transition, and lets a
@@ -3311,7 +3317,7 @@
       iframe.style.visibility = 'hidden';
       iframe.allow = 'autoplay; fullscreen';
       // Sandbox into a unique origin so widget scripts can't read window.parent state.
-      iframe.setAttribute('sandbox', 'allow-scripts');
+      iframe.setAttribute('sandbox', widgetSandboxAttr(item));
 
       const reveal = () => {
         if (!pendingWidgetSwap || pendingWidgetSwap.iframe !== iframe) return; // superseded / discarded
@@ -3887,7 +3893,7 @@
           iframe.allow = 'autoplay; fullscreen';
           // Sandbox into a unique origin so widget scripts can't read window.parent
           // state (localStorage / JWT). allow-scripts keeps inline widget code running.
-          iframe.setAttribute('sandbox', 'allow-scripts');
+          iframe.setAttribute('sandbox', widgetSandboxAttr(item));
           mount.appendChild(iframe);
           if (PREVIEW_MODE && item.widget_type === 'webpage') addWebpageNote(mount); // #104
           if (!isFollower) scheduleAdvance(nextItem, (item.duration_sec || 30) * 1000);
@@ -3999,7 +4005,7 @@
         iframe.src = `${config.serverUrl}/api/widgets/${a.widget_id}/render?device=${encodeURIComponent(config.deviceId||'')}&rev=${a.widget_rev||0}`;
         // Sandbox into a unique origin so widget scripts can't read window.parent
         // state (localStorage / JWT). allow-scripts keeps inline widget code running.
-        iframe.setAttribute('sandbox', 'allow-scripts');
+        iframe.setAttribute('sandbox', widgetSandboxAttr(a));
         div.appendChild(iframe);
         if (PREVIEW_MODE && a.widget_type === 'webpage') addWebpageNote(div); // #104
         if (multi) zoneTimers[zone.id] = setTimeout(advance, dur);

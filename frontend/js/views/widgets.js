@@ -292,7 +292,7 @@ function openContentPicker({ multiple = false, title } = {}) {
   });
 }
 
-function showPreviewModal(sessionId, widgetType) {
+function showPreviewModal(sessionId, widgetType, widgetSandboxIsolationDisabled = false) {
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);display:flex;align-items:center;justify-content:center;z-index:10000;padding:16px';
   // #104: webpage widgets pointing at frame-denying sites (X-Frame-Options) can't be
@@ -307,7 +307,7 @@ function showPreviewModal(sessionId, widgetType) {
         <strong style="color:var(--text-primary)">${t('widget.preview_title')}</strong>
         <button class="btn btn-secondary btn-sm" id="pvClose">${t('widget.close')}</button>
       </div>
-      <iframe id="pvIframe" sandbox="allow-scripts" style="flex:1;width:100%;border:0;background:#000"></iframe>
+      <iframe id="pvIframe" sandbox="${widgetSandboxIsolationDisabled ? 'allow-scripts allow-same-origin' : 'allow-scripts'}" style="flex:1;width:100%;border:0;background:#000"></iframe>
       ${webpageNote}
     </div>`;
   document.body.appendChild(overlay);
@@ -1004,7 +1004,9 @@ export async function render(container) {
       });
       if (!res.ok) throw new Error(t('widget.toast.preview_failed'));
       const { id } = await res.json();
-      showPreviewModal(id, type);
+      let user = null;
+      try { user = JSON.parse(localStorage.getItem('user') || 'null'); } catch (_) { user = null; }
+      showPreviewModal(id, type, !!user?.current_organization?.widget_sandbox_isolation_disabled);
     } catch (err) { showToast(err.message, 'error'); }
   };
 

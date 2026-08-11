@@ -29,14 +29,11 @@ const HTML = fs.readFileSync(path.join(__dirname, '..', 'player', 'index.html'),
 const SW = fs.readFileSync(path.join(__dirname, '..', 'player', 'sw.js'), 'utf8');
 const WIDGETS = fs.readFileSync(path.join(__dirname, '..', 'routes', 'widgets.js'), 'utf8');
 
-test('the widget iframe is sandboxed into an opaque origin', () => {
-  const sandboxes = [...HTML.matchAll(/setAttribute\('sandbox',\s*'([^']*)'\)/g)].map((m) => m[1]);
-  assert.ok(sandboxes.length > 0, 'the player must sandbox its widget frames');
-  for (const s of sandboxes) {
-    assert.match(s, /allow-scripts/, 'a widget needs scripts to be a widget');
-    assert.doesNotMatch(s, /allow-same-origin/,
-      'allow-same-origin would give widget scripts the player origin — its storage, its device token');
-  }
+test('the widget iframe stays null-origin by default, with explicit per-item opt-in only', () => {
+  assert.match(HTML, /function widgetSandboxAttr\(item\)/, 'widget sandbox policy should be centralized');
+  assert.match(HTML, /item && item\.widget_allow_same_origin/, 'opt-in must be keyed by item/org setting');
+  assert.match(HTML, /allow-scripts allow-same-origin/, 'explicit opt-in token must exist');
+  assert.match(HTML, /: 'allow-scripts'/, 'safe default remains allow-scripts only');
 });
 
 test('the offline guarantee for widgets is the HTTP header, and the server still sets it', () => {

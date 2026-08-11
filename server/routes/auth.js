@@ -766,7 +766,7 @@ router.get('/me', requireAuth, resolveTenancy, (req, res) => {
   }
 
   const currentOrg = req.organizationId
-    ? db.prepare('SELECT id, name FROM organizations WHERE id = ?').get(req.organizationId)
+    ? db.prepare('SELECT id, name, COALESCE(widget_sandbox_isolation_disabled, 0) AS widget_sandbox_isolation_disabled FROM organizations WHERE id = ?').get(req.organizationId)
     : null;
 
   res.json({

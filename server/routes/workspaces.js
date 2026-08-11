@@ -3,6 +3,8 @@ const router = express.Router();
 const crypto = require('crypto');
 const { db } = require('../db/database');
 const { canAdminWorkspace, canAccessWorkspace } = require('../lib/permissions');
+const { isPlatformRole } = require('../middleware/auth');
+const { logActivity, getClientIp } = require('../services/activity');
 const { sendEmail } = require('../services/email');
 
 // Workspace management routes. Operates on a target workspace specified by
@@ -18,6 +20,7 @@ const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 // chosen email became stored XSS in the platform admin's user list.
 const EMAIL_RE = /^[^\s@<>"'`\\;,()\[\]]+@[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$/;
 const WORKSPACE_ROLES = ['workspace_admin', 'workspace_editor', 'workspace_viewer'];
+const WIDGET_SANDBOX_CONFIRM_PHRASE = 'I understand I am enabling a security hole';
 
 // Operational policy - env-configurable with conservative defaults. Restart
 // required to take effect. The guarded parseInt rejects garbage strings
@@ -94,6 +97,58 @@ router.patch('/:id', (req, res) => {
 
   const updated = db.prepare('SELECT id, name, slug, organization_id FROM workspaces WHERE id = ?').get(req.params.id);
   res.json(updated);
+});
+
+// Organization security settings for the workspace's parent org.
+// Update is restricted to org_owner/org_admin (or platform admin); workspace_admin
+// alone is intentionally insufficient for this org-wide security switch.
+router.put('/:id/security-settings', (req, res) => {
+  const ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.params.id);
+  if (!ws) return res.status(404).json({ error: 'Workspace not found' });
+  if (!canAdminWorkspace(db, req.user, ws)) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  const isPlatformAdmin = isPlatformRole(req.user.role);
+  const orgMember = db.prepare(
+    'SELECT role FROM organization_members WHERE organization_id = ? AND user_id = ?'
+  ).get(ws.organization_id, req.user.id);
+  const isOrgAdmin = !!(orgMember && (orgMember.role === 'org_owner' || orgMember.role === 'org_admin'));
+  if (!isPlatformAdmin && !isOrgAdmin) {
+    return res.status(403).json({ error: 'Organization admin required' });
+  }
+
+  if (typeof req.body?.widgetSandboxIsolationDisabled !== 'boolean') {
+    return res.status(400).json({ error: 'widgetSandboxIsolationDisabled must be boolean' });
+  }
+  const next = req.body.widgetSandboxIsolationDisabled ? 1 : 0;
+  if (next === 1) {
+    const typed = String(req.body?.confirmationPhrase || '').trim();
+    if (typed !== WIDGET_SANDBOX_CONFIRM_PHRASE) {
+      return res.status(400).json({ error: 'Exact confirmation phrase required' });
+    }
+  }
+
+  const current = db.prepare(
+    'SELECT COALESCE(widget_sandbox_isolation_disabled, 0) AS v FROM organizations WHERE id = ?'
+  ).get(ws.organization_id);
+  db.prepare(
+    "UPDATE organizations SET widget_sandbox_isolation_disabled = ?, updated_at = strftime('%s','now') WHERE id = ?"
+  ).run(next, ws.organization_id);
+  req.workspaceId = ws.id; // stamp tenant for activityLogger row
+  logActivity(
+    req.user.id,
+    'org_widget_sandbox_isolation_setting_changed',
+    `organization_id=${ws.organization_id} widgetSandboxIsolationDisabled=${next}`,
+    null,
+    getClientIp(req),
+    ws.id
+  );
+
+  res.json({
+    organization_id: ws.organization_id,
+    widgetSandboxIsolationDisabled: !!next,
+    changed: !!current && Number(current.v || 0) !== next,
+  });
 });
 
 // ==================== Members / invites ====================

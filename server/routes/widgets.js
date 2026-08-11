@@ -193,14 +193,15 @@ router.delete('/:id', (req, res) => {
 });
 
 const KNOWN_WIDGET_TYPES = new Set(['clock','weather','rss','text','webpage','social','directory-board','directory-search','diag-smoothness']);
-function renderWidgetHtml(type, config) {
+function renderWidgetHtml(type, config, opts = {}) {
+  const iframeSandbox = opts.iframeSandbox || 'allow-scripts';
   config = config || {};
   switch (type) {
     case 'clock': return renderClock(config);
     case 'weather': return renderWeather(config);
     case 'rss': return renderRSS(config);
-    case 'text': return renderText(config);
-    case 'webpage': return renderWebpage(config);
+    case 'text': return renderText(config, iframeSandbox);
+    case 'webpage': return renderWebpage(config, iframeSandbox);
     case 'social': return renderSocial(config);
     case 'directory-board': return renderDirectoryBoard(config);
     case 'directory-search': return renderDirectorySearch(config);
@@ -209,11 +210,29 @@ function renderWidgetHtml(type, config) {
   }
 }
 
+function widgetIframeSandboxForWorkspace(workspaceId) {
+  if (!workspaceId) return 'allow-scripts';
+  try {
+    const row = db.prepare(`
+      SELECT COALESCE(o.widget_sandbox_isolation_disabled, 0) AS disabled
+      FROM workspaces ws
+      LEFT JOIN organizations o ON o.id = ws.organization_id
+      WHERE ws.id = ?
+    `).get(workspaceId);
+    return Number(row?.disabled || 0) === 1
+      ? 'allow-scripts allow-same-origin'
+      : 'allow-scripts';
+  } catch (_) {
+    return 'allow-scripts';
+  }
+}
+
 // Render widget as HTML page
 router.get('/:id/render', (req, res) => {
   const widget = db.prepare('SELECT * FROM widgets WHERE id = ?').get(req.params.id);
   if (!widget) return res.status(404).send('Widget not found');
   const config = JSON.parse(widget.config || '{}');
+  const iframeSandbox = widgetIframeSandboxForWorkspace(widget.workspace_id);
   // This page is DESIGNED to be embedded by the player, which frames it in a
   // sandboxed (allow-scripts, no allow-same-origin) iframe = a null origin. The
   // global helmet X-Frame-Options: SAMEORIGIN refuses that (null != same), so
@@ -235,7 +254,7 @@ router.get('/:id/render', (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
   }
   res.setHeader('Content-Type', 'text/html');
-  res.send(renderWidgetHtml(widget.widget_type, config));
+  res.send(renderWidgetHtml(widget.widget_type, config, { iframeSandbox }));
 });
 
 // Public JSON feed of a directory board's entries. A directory-search page polls
@@ -309,7 +328,8 @@ router.post('/preview', (req, res) => {
   const { widget_type, config } = req.body || {};
   if (!widget_type || typeof widget_type !== 'string') return res.status(400).json({ error: 'widget_type required' });
   if (!KNOWN_WIDGET_TYPES.has(widget_type)) return res.status(400).json({ error: 'Unknown widget_type' });
-  let html = renderWidgetHtml(widget_type, config || {});
+  const iframeSandbox = widgetIframeSandboxForWorkspace(req.workspaceId);
+  let html = renderWidgetHtml(widget_type, config || {}, { iframeSandbox });
   if (req.workspaceId) html = inlineUserContent(html, req.workspaceId);
   res.setHeader('Content-Type', 'text/html');
   res.send(html);
@@ -331,7 +351,8 @@ router.post('/preview-session', (req, res) => {
   if (!widget_type || typeof widget_type !== 'string') return res.status(400).json({ error: 'widget_type required' });
   if (!KNOWN_WIDGET_TYPES.has(widget_type)) return res.status(400).json({ error: 'Unknown widget_type' });
   const id = uuidv4();
-  const html = renderWidgetHtml(widget_type, config || {});
+  const iframeSandbox = widgetIframeSandboxForWorkspace(req.workspaceId);
+  const html = renderWidgetHtml(widget_type, config || {}, { iframeSandbox });
   previewStore.set(id, { html, widget_type, created: Date.now() });
   res.json({ id, url: `/api/widgets/preview-session/${id}` });
 });
@@ -406,34 +427,67 @@ load(); setInterval(load, 600000);
 }
 
 function renderRSS(c) {
+  // scroll_speed is authored in the UI as "seconds" (legacy field), but that used to be wired
+  // straight into animation-duration: a *fixed total time* for the whole strip to cross the
+  // screen. That makes the on-screen speed depend on how much content there is - a feed with
+  // many items gets dragged through in the same {scroll_speed}s as a feed with one, so it
+  // flies past far too fast, never lets the reader finish, and simply "jumps back to the
+  // start" once the fixed duration is up. Instead we treat scroll_speed as calibrating a
+  // constant px/sec rate (using one viewport-width per scroll_speed seconds as the reference,
+  // matching prior behaviour for content that fits in one screen), then measure the actual
+  // rendered width of the ticker and derive a duration long enough to move that full distance
+  // at the same constant speed - so more items simply take proportionally longer, and every
+  // item scrolls fully into and out of view before the loop restarts.
+  const scrollSpeedSec = safeNumber(c.scroll_speed, 30);
   return `<!DOCTYPE html><html><head><style>
   * { margin:0; padding:0; box-sizing:border-box; }
   body { background:${safeCss(c.background, '#000')}; height:100vh; overflow:hidden; font-family:-apple-system,sans-serif; }
-  .ticker { display:flex; align-items:center; height:100%; white-space:nowrap; animation:scroll ${safeNumber(c.scroll_speed, 30)}s linear infinite; }
+  .ticker { display:flex; align-items:center; height:100%; white-space:nowrap; position:relative; will-change:transform; }
   .item { display:inline-block; padding:0 40px; font-size:${safeNumber(c.font_size, 24)}px; color:${safeCss(c.color, '#FFF')}; }
   .item .title { font-weight:600; }
   .item .sep { margin:0 20px; opacity:0.3; }
-  @keyframes scroll { 0%{transform:translateX(100vw)} 100%{transform:translateX(-100%)} }
 </style></head><body>
 <div class="ticker" id="ticker"><div class="item">Loading feed...</div></div>
 <script>
+var SCROLL_SPEED_SEC = ${scrollSpeedSec};
+var ticker = document.getElementById('ticker');
+var anim = null;
+function restartAnimation() {
+  if (anim) { anim.cancel(); anim = null; }
+  var viewportW = window.innerWidth;
+  var tickerW = ticker.scrollWidth;
+  // Reference speed: one viewport-width travelled every SCROLL_SPEED_SEC seconds, so the
+  // default of 30s behaves the same as before for a feed that fits within one screen.
+  var pxPerSec = viewportW / SCROLL_SPEED_SEC;
+  var distance = viewportW + tickerW; // starts fully off-screen right, ends fully off-screen left
+  var durationMs = Math.max(1000, (distance / pxPerSec) * 1000);
+  anim = ticker.animate(
+    [
+      { transform: 'translateX(' + viewportW + 'px)' },
+      { transform: 'translateX(-' + tickerW + 'px)' },
+    ],
+    { duration: durationMs, iterations: Infinity, easing: 'linear' }
+  );
+}
 async function load() {
   try {
     const r = await fetch('https://api.rss2json.com/v1/api.json?rss_url=' + encodeURIComponent('${escapeHtml(c.feed_url) || ''}'));
     const d = await r.json();
     const items = d.items?.slice(0, ${safeNumber(c.max_items, 10)}) || [];
     // NOTE: RSS feed titles are external content - using textContent instead of innerHTML to prevent XSS
-    document.getElementById('ticker').innerHTML = items.map(i => {
+    ticker.innerHTML = items.map(i => {
       const el = document.createElement('span'); el.textContent = i.title;
       return '<div class="item"><span class="title">' + el.innerHTML + '</span></div><div class="item sep">•</div>';
     }).join('') || '<div class="item">No items</div>';
-  } catch(e) { document.getElementById('ticker').innerHTML = '<div class="item">Feed unavailable</div>'; }
+  } catch(e) { ticker.innerHTML = '<div class="item">Feed unavailable</div>'; }
+  requestAnimationFrame(restartAnimation);
 }
+window.addEventListener('resize', restartAnimation);
 load(); setInterval(load, 300000);
 </script></body></html>`;
 }
 
-function renderText(c) {
+function renderText(c, iframeSandbox = 'allow-scripts') {
   let html = c.html || '<p style="color:white;padding:20px">Empty text widget</p>';
 
   // LEGACY DESIGNER RESCUE — deliberately narrow.
@@ -535,17 +589,17 @@ function renderText(c) {
   * { margin:0; padding:0; }
   html, body { width:100vw; height:100vh; overflow:hidden; background:${safeCss(c.background, 'transparent')}; }
   iframe { width:100%; height:100%; border:0; display:block; }
-</style></head><body><iframe sandbox="allow-scripts" srcdoc="${escapeHtml(inner)}"></iframe></body></html>`;
+</style></head><body><iframe sandbox="${escapeHtml(iframeSandbox)}" srcdoc="${escapeHtml(inner)}"></iframe></body></html>`;
 }
 
-function renderWebpage(c) {
+function renderWebpage(c, iframeSandbox = 'allow-scripts') {
   const zoom = (c.zoom || 100) / 100;
   const invZoom = 100 / (c.zoom || 100) * 100;
   return `<!DOCTYPE html><html><head><style>
   * { margin:0; } body { height:100vh; overflow:hidden; }
   iframe { width:${invZoom}%; height:${invZoom}%; border:0; transform:scale(${zoom}); transform-origin:0 0; }
 </style></head><body>
-<iframe src="${escapeHtml(safeUrl(c.url))}" sandbox="allow-scripts"></iframe>
+<iframe src="${escapeHtml(safeUrl(c.url))}" sandbox="${escapeHtml(iframeSandbox)}"></iframe>
 ${c.refresh_interval > 0 ? `<script>setInterval(()=>document.querySelector('iframe').src=document.querySelector('iframe').src,${c.refresh_interval * 1000});</script>` : ''}
 </body></html>`;
 }

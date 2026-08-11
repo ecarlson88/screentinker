@@ -16,6 +16,9 @@ export async function render(container) {
   // admin is now just isPlatformAdmin. (Elevated capability otherwise comes from
   // org/workspace membership, gated in the members views, not users.role.)
   const isAdmin = isSuperAdmin;
+  const canManageOrgSecurity = isSuperAdmin || user.current_org_role === 'org_owner' || user.current_org_role === 'org_admin';
+  const widgetIsolationDisabled = !!user.current_organization?.widget_sandbox_isolation_disabled;
+  const WIDGET_ISOLATION_CONFIRM_PHRASE = 'I understand I am enabling a security hole';
 
   // #83: the "About" version was hardcoded (showed v1.4.1 regardless of the build).
   // Read it from the server (/api/version) the same way the admin view does.
@@ -131,6 +134,24 @@ export async function render(container) {
       <div id="tokenList"><p style="color:var(--text-muted);font-size:13px">${t('settings.loading_users')}</p></div>
       <div id="tokenEditPanel" style="display:none"></div>
     </div>
+
+    ${canManageOrgSecurity ? `
+    <div class="settings-section">
+      <h3>Security</h3>
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap">
+        <div style="min-width:260px;flex:1">
+          <div style="font-weight:600">Widget sandbox isolation</div>
+          <div style="font-size:12px;color:var(--text-muted);margin-top:4px">
+            Keep widget code in a null-origin sandbox. Turning this off allows widget code to run with same-origin access.
+          </div>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;white-space:nowrap">
+          <input type="checkbox" id="widgetSandboxIsolationToggle" ${widgetIsolationDisabled ? '' : 'checked'}>
+          <span>${widgetIsolationDisabled ? 'Isolation disabled' : 'Isolation enabled'}</span>
+        </label>
+      </div>
+    </div>
+    ` : ''}
 
     ${isAdmin ? `
     <div class="settings-section">
@@ -1147,6 +1168,111 @@ export async function render(container) {
     } finally {
       btn.disabled = false;
     }
+  });
+
+  document.getElementById('widgetSandboxIsolationToggle')?.addEventListener('change', async (e) => {
+    const checkbox = e.currentTarget;
+    const shouldEnableIsolation = !!checkbox.checked;
+    const workspaceId = user.current_workspace_id;
+    if (!workspaceId) {
+      checkbox.checked = !shouldEnableIsolation;
+      showToast('No active workspace', 'error');
+      return;
+    }
+
+    if (!shouldEnableIsolation) {
+      const confirmed = await openWidgetSandboxDisableConfirmModal(WIDGET_ISOLATION_CONFIRM_PHRASE);
+      if (!confirmed) {
+        checkbox.checked = true;
+        return;
+      }
+      try {
+        await api.updateWorkspaceSecuritySettings(workspaceId, {
+          widgetSandboxIsolationDisabled: true,
+          confirmationPhrase: WIDGET_ISOLATION_CONFIRM_PHRASE,
+        });
+        const nextUser = { ...user, current_organization: { ...(user.current_organization || {}), widget_sandbox_isolation_disabled: 1 } };
+        localStorage.setItem('user', JSON.stringify(nextUser));
+        showToast('Widget sandbox isolation disabled', 'success');
+      } catch (err) {
+        checkbox.checked = true;
+        showToast(err.message, 'error');
+      }
+      return;
+    }
+
+    try {
+      await api.updateWorkspaceSecuritySettings(workspaceId, { widgetSandboxIsolationDisabled: false });
+      const nextUser = { ...user, current_organization: { ...(user.current_organization || {}), widget_sandbox_isolation_disabled: 0 } };
+      localStorage.setItem('user', JSON.stringify(nextUser));
+      showToast('Widget sandbox isolation enabled', 'success');
+    } catch (err) {
+      checkbox.checked = false;
+      showToast(err.message, 'error');
+    }
+  });
+}
+
+function openWidgetSandboxDisableConfirmModal(confirmationPhrase) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.style.display = 'flex';
+    overlay.innerHTML = `
+      <div class="modal" style="width:min(760px,96vw)">
+        <div class="modal-header"><h3>Disable widget sandbox isolation for this organization</h3></div>
+        <div class="modal-body" style="white-space:pre-wrap;line-height:1.45">
+Widget HTML currently runs in a null-origin sandbox. That means widget code
+cannot read your session, your cookies, or anything else stored by
+ScreenTinker in this browser.
+
+Turning this off re-enables allow-same-origin. Widget HTML will then run with
+the same privileges as ScreenTinker itself. Any script in any widget in this
+organization will be able to:
+
+  - Read the session token of every logged-in user who views a display or
+    preview
+  - Call the ScreenTinker API as that user, including admin actions
+  - Read and modify content on every other display in this organization
+  - Silently exfiltrate all of the above to any server it likes
+
+Because allow-scripts is also required for widgets to function, a widget can
+remove its own sandbox entirely once same-origin is granted. There is no
+partial protection left after this point.
+
+Only enable this if every widget source in this organization is code you
+wrote, or code from a party you would trust with your admin password. A single
+compromised third-party embed, CDN, or ad tag is enough.
+
+This setting applies to ALL widgets in this organization and cannot be scoped
+per display.
+          <div class="form-group" style="margin-top:16px">
+            <label for="widgetSandboxConfirmInput">Type the phrase below to confirm:</label>
+            <div style="margin:6px 0 8px;font-weight:600">${esc(confirmationPhrase)}</div>
+            <input id="widgetSandboxConfirmInput" type="text" class="input" autocomplete="off">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="widgetSandboxConfirmCancel">Cancel</button>
+          <button class="btn btn-danger" id="widgetSandboxConfirmSubmit" disabled>Disable isolation</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const input = overlay.querySelector('#widgetSandboxConfirmInput');
+    const submit = overlay.querySelector('#widgetSandboxConfirmSubmit');
+    const close = (ok) => {
+      overlay.remove();
+      resolve(ok);
+    };
+    const updateEnabled = () => {
+      submit.disabled = input.value.trim() !== confirmationPhrase;
+    };
+    input.addEventListener('input', updateEnabled);
+    overlay.querySelector('#widgetSandboxConfirmCancel').addEventListener('click', () => close(false));
+    submit.addEventListener('click', () => close(true));
+    overlay.addEventListener('click', (ev) => { if (ev.target === overlay) close(false); });
   });
 }
 

@@ -78,6 +78,7 @@ function runMigration({ db: existingDb = null, dryRun = false, logger = console 
         default_brand_name      TEXT,
         default_logo_url        TEXT,
         default_primary_color   TEXT,
+        widget_sandbox_isolation_disabled INTEGER NOT NULL DEFAULT 0,
         created_at              INTEGER NOT NULL DEFAULT (strftime('%s','now')),
         updated_at              INTEGER NOT NULL DEFAULT (strftime('%s','now'))
       );

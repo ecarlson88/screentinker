@@ -296,12 +296,24 @@ function resolveGroupSync(device, deviceId) {
 //
 // Refreshing the rev here, at send time, makes the URL differ exactly when the content differs —
 // and only then, so the anti-flash reuse still holds for widgets nobody has touched.
-const widgetRevOf = db.prepare('SELECT updated_at FROM widgets WHERE id = ?').pluck();
+const widgetFactsOf = db.prepare(`
+  SELECT w.updated_at AS rev,
+         COALESCE(o.widget_sandbox_isolation_disabled, 0) AS same_origin
+  FROM widgets w
+  LEFT JOIN workspaces ws ON ws.id = w.workspace_id
+  LEFT JOIN organizations o ON o.id = ws.organization_id
+  WHERE w.id = ?
+`);
 function refreshWidgetRevs(assignments) {
   if (!Array.isArray(assignments)) return;
   for (const a of assignments) {
     if (!a || !a.widget_id) continue;
-    try { a.widget_rev = widgetRevOf.get(a.widget_id) ?? a.widget_rev ?? 0; } catch (_) { /* keep published */ }
+    try {
+      const facts = widgetFactsOf.get(a.widget_id);
+      if (!facts) continue;
+      a.widget_rev = facts.rev ?? a.widget_rev ?? 0;
+      a.widget_allow_same_origin = Number(facts.same_origin || 0) === 1;
+    } catch (_) { /* keep published */ }
   }
 }
 

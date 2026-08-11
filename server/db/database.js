@@ -587,6 +587,7 @@ const migrations = [
   // additive — existing rows are unaffected and a code-only rollback leaves dead columns.
   "ALTER TABLE users ADD COLUMN password_reset_hash TEXT",
   "ALTER TABLE users ADD COLUMN password_reset_expires INTEGER",
+  "ALTER TABLE organizations ADD COLUMN widget_sandbox_isolation_disabled INTEGER NOT NULL DEFAULT 0",
   // AUTH-05: make break-glass recovery revocable, single-use and auditable.
   //
   // scripts/reset-admin.js mints a JWT carrying `recovery: true`, which middleware/auth.js

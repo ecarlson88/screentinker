@@ -223,6 +223,7 @@ export const api = {
   updateMe: (data) => request('/auth/me', { method: 'PUT', body: JSON.stringify(data) }),
   switchWorkspace: (workspaceId) => request('/auth/switch-workspace', { method: 'POST', body: JSON.stringify({ workspace_id: workspaceId }) }),
   renameWorkspace: (id, data) => request(`/workspaces/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  updateWorkspaceSecuritySettings: (workspaceId, data) => request(`/workspaces/${workspaceId}/security-settings`, { method: 'PUT', body: JSON.stringify(data) }),
 
   // Workspace members + invites (slice 2A read-only)
   getWorkspaceMembers: (id) => request(`/workspaces/${id}/members`),
