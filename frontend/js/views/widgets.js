@@ -213,7 +213,7 @@ function openContentPicker({ multiple = false, title } = {}) {
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;padding:16px';
     overlay.innerHTML = `
       <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:20px;width:100%;max-width:640px;max-height:90vh;display:flex;flex-direction:column">
-        <h3 style="margin:0 0 12px;color:var(--text-primary)">${title || t('widget.picker.default_title')}</h3>
+        <h3 style="margin:0 0 12px;color:var(--text-primary)">${esc(title || t('widget.picker.default_title'))}</h3>
         <input type="text" id="cpSearch" class="input" placeholder="${t('widget.picker.search')}" style="margin-bottom:12px">
         <div id="cpList" style="flex:1;overflow-y:auto;min-height:200px"></div>
         <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;gap:8px;flex-wrap:wrap">
@@ -400,7 +400,7 @@ export async function render(container) {
         break;
       case 'weather':
         html += `
-          <div class="form-group"><label>${t('widget.field.location')}</label><input type="text" id="wLocation" class="input" value="${config.location || ''}" placeholder="${t('widget.field.location_placeholder')}"></div>
+          <div class="form-group"><label>${t('widget.field.location')}</label><input type="text" id="wLocation" class="input" value="${esc(config.location || '')}" placeholder="${t('widget.field.location_placeholder')}"></div>
           <div class="form-group"><label>${t('widget.field.units')}</label><select id="wUnits" class="input" style="background:var(--bg-input)"><option value="imperial" ${config.units !== 'metric' ? 'selected' : ''}>${t('widget.field.units_imperial')}</option><option value="metric" ${config.units === 'metric' ? 'selected' : ''}>${t('widget.field.units_metric')}</option></select></div>
           <div class="form-group"><label>${t('widget.field.font_size')}</label><input type="number" id="wFontSize" class="input" value="${config.font_size || 48}"></div>
           <div class="form-group"><label>${t('widget.field.color')}</label><input type="color" id="wColor" value="${config.color || '#FFFFFF'}" style="width:60px;height:32px;border:none"></div>`;
@@ -429,7 +429,7 @@ export async function render(container) {
       case 'social':
         html += `
           <div class="form-group"><label>${t('widget.field.platform')}</label><select id="wPlatform" class="input" style="background:var(--bg-input)"><option value="twitter">${t('widget.field.platform_twitter')}</option><option value="instagram">${t('widget.field.platform_instagram')}</option></select></div>
-          <div class="form-group"><label>${t('widget.field.query')}</label><input type="text" id="wQuery" class="input" value="${config.query || ''}" placeholder="${t('widget.field.query_placeholder')}"></div>`;
+          <div class="form-group"><label>${t('widget.field.query')}</label><input type="text" id="wQuery" class="input" value="${esc(config.query || '')}" placeholder="${t('widget.field.query_placeholder')}"></div>`;
         break;
       case 'directory-board':
         html += `

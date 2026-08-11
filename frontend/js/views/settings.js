@@ -341,7 +341,7 @@ export async function render(container) {
             let html = t('settings.import.complete', { imported });
             if (result.device_pairings?.length) {
               html += `<br><br><strong>${t('settings.import.pairing_codes_title')}</strong><br><table style="margin-top:8px;font-size:12px;border-collapse:collapse">` +
-                result.device_pairings.map(d => `<tr><td style="padding:4px 12px 4px 0">${d.name}</td><td style="font-family:monospace;font-weight:700;font-size:14px;letter-spacing:2px">${d.pairing_code}</td></tr>`).join('') +
+                result.device_pairings.map(d => `<tr><td style="padding:4px 12px 4px 0">${esc(d.name)}</td><td style="font-family:monospace;font-weight:700;font-size:14px;letter-spacing:2px">${d.pairing_code}</td></tr>`).join('') +
                 `</table><br>${t('settings.import.pairing_codes_hint')}`;
             }
             html += `<br><br>${(result.notes || []).map(n => '&bull; ' + n).join('<br>')}`;

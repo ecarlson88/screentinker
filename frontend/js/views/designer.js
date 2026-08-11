@@ -576,7 +576,7 @@ function redraw() {
         break;
       case 'countdown':
         html += `<div style="position:absolute;left:${el.x}%;top:${el.y}%;text-align:center;color:${el.color};${border}${cursor}" data-idx="${i}">
-          <div style="font-size:${el.fontSize / 15}cqw;opacity:0.8">${el.label || ''}</div>
+          <div style="font-size:${el.fontSize / 15}cqw;opacity:0.8">${esc(el.label || '')}</div>
           <div style="font-size:${el.fontSize / 10}cqw;font-weight:bold" id="countdown_${i}"></div>
         </div>`;
         break;
@@ -695,7 +695,7 @@ function updateProps() {
       <div class="form-group"><label>${t('designer.prop.opacity')}</label><input type="range" min="0" max="1" step="0.1" value="${el.opacity}" data-prop="opacity" style="width:100%"></div>
       <div class="form-group"><label>${t('designer.prop.shape')}</label><select class="input" style="background:var(--bg-input)" data-prop="shape"><option ${el.shape === 'rect' ? 'selected' : ''}>rect</option><option ${el.shape === 'circle' ? 'selected' : ''}>circle</option></select></div>`;
   } else if (el.type === 'weather') {
-    html += `<div class="form-group"><label>${t('designer.prop.location')}</label><input type="text" class="input" value="${el.location}" data-prop="location"></div>
+    html += `<div class="form-group"><label>${t('designer.prop.location')}</label><input type="text" class="input" value="${esc(el.location)}" data-prop="location"></div>
       <div class="form-group"><label>${t('widget.field.units')}</label><select class="input" data-prop="units">
         <option value="imperial" ${el.units !== 'metric' ? 'selected' : ''}>${t('widget.field.units_imperial')}</option>
         <option value="metric" ${el.units === 'metric' ? 'selected' : ''}>${t('widget.field.units_metric')}</option>
@@ -709,7 +709,7 @@ function updateProps() {
       <div class="form-group"><label>${t('designer.prop.bg_color')}</label><input type="text" class="input" value="${el.bgColor}" data-prop="bgColor"></div>`;
   } else if (el.type === 'countdown') {
     html += `<div class="form-group"><label>${t('designer.prop.target_date')}</label><input type="date" class="input" value="${el.targetDate}" data-prop="targetDate"></div>
-      <div class="form-group"><label>${t('designer.prop.label')}</label><input type="text" class="input" value="${el.label}" data-prop="label"></div>
+      <div class="form-group"><label>${t('designer.prop.label')}</label><input type="text" class="input" value="${esc(el.label)}" data-prop="label"></div>
       <div class="form-group"><label>${t('designer.prop.size')}</label><input type="range" min="16" max="100" value="${el.fontSize}" data-prop="fontSize" style="width:100%"></div>
       <div class="form-group"><label>${t('designer.prop.color')}</label><input type="color" value="${el.color}" data-prop="color" style="width:100%;height:28px;border:none"></div>`;
   }
@@ -797,7 +797,7 @@ function generateInnerHTML() {
         break;
       case 'countdown':
         html += `<div style="position:absolute;left:${el.x}%;top:${el.y}%;text-align:center;color:${el.color}">
-          <div style="font-size:${fsLabel}vw;opacity:0.8">${el.label}</div>
+          <div style="font-size:${fsLabel}vw;opacity:0.8">${esc(el.label)}</div>
           <div style="font-size:${fs}vw;font-weight:bold" id="cd${i}"></div></div>
           <script>setInterval(()=>{const d=new Date('${el.targetDate}')-new Date();if(d<=0){document.getElementById('cd${i}').textContent='NOW!';return}document.getElementById('cd${i}').textContent=Math.floor(d/864e5)+'d '+Math.floor(d%864e5/36e5)+'h '+Math.floor(d%36e5/6e4)+'m'},6e4)</script>`;
         break;

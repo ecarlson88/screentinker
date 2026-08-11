@@ -337,7 +337,7 @@ async function loadDevice(deviceId, activeTab = null) {
     contentEl.innerHTML = `
       <div class="device-header">
         <div class="device-header-left">
-          <h1 id="deviceName">${device.name}</h1>
+          <h1 id="deviceName">${esc(device.name)}</h1>
           ${(() => { const b = livenessBadge(device); return `<span class="device-status-badge ${b.state}"${b.title ? ` title="${esc(b.title)}"` : ''}>${esc(b.label)}</span>`; })()}
           ${device.owner_name || device.owner_email ? `<span style="font-size:12px;color:var(--text-muted)">${t('device.owner_label', { owner: device.owner_name || device.owner_email })}</span>` : ''}
         </div>
@@ -1775,7 +1775,7 @@ async function setupPlaylistActions(device) {
               ${zones.length > 0 ? `
                 <select id="assignZone" class="input" style="background:var(--bg-input)">
                   <option value="">${t('device.assign.zone_default')}</option>
-                  ${zones.map(z => `<option value="${z.id}">${z.name} (${Math.round(z.width_percent)}% x ${Math.round(z.height_percent)}%)</option>`).join('')}
+                  ${zones.map(z => `<option value="${z.id}">${esc(z.name)} (${Math.round(z.width_percent)}% x ${Math.round(z.height_percent)}%)</option>`).join('')}
                 </select>
               ` : !device.layout_id ? `
                 <div style="font-size:12px;color:var(--text-muted);padding:6px 0;line-height:1.5">${t('device.assign.zone_no_layout')}</div>
@@ -1824,7 +1824,7 @@ async function setupPlaylistActions(device) {
                   <div style="aspect-ratio:16/9;display:flex;align-items:center;justify-content:center;background:var(--bg-primary);font-size:32px">
                     ${icons[w.widget_type] || '&#9881;'}
                   </div>
-                  <div class="assign-content-item-name">${w.name}</div>
+                  <div class="assign-content-item-name">${esc(w.name)}</div>
                 </div>`;
               }).join('') || `<p style="color:var(--text-muted);padding:16px;text-align:center">${t('device.assign.no_widgets')} <a href="#/widgets" style="color:var(--accent)">${t('device.assign.create_one')}</a></p>`}
             </div>
@@ -1833,7 +1833,7 @@ async function setupPlaylistActions(device) {
               ${kioskPages.map(k => `
                 <div class="assign-content-item" data-content-id="${k.id}" data-type="kiosk">
                   <div style="aspect-ratio:16/9;display:flex;align-items:center;justify-content:center;background:var(--bg-primary);font-size:32px">&#128433;</div>
-                  <div class="assign-content-item-name">${k.name}</div>
+                  <div class="assign-content-item-name">${esc(k.name)}</div>
                 </div>
               `).join('') || `<p style="color:var(--text-muted);padding:16px;text-align:center">${t('device.assign.no_kiosk')} <a href="#/kiosk" style="color:var(--accent)">${t('device.assign.create_one')}</a></p>`}
             </div>
