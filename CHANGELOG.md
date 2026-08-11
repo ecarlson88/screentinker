@@ -1,5 +1,84 @@
 # Changelog
 
+## 1.9.34-alpha1
+
+**A prerelease, for the alpha instance.** It is not a production build and no display should be
+pulled onto it except deliberately: a prerelease sorts *below* its own release in semver, so a player
+that takes `1.9.34-alpha1` without being opted in will see `1.9.33` as newer and roll itself back.
+Opting a display in is what stops that.
+
+The headline is single sign-on, rebuilt from nothing — and the reason it was rebuilt rather than
+extended is a vulnerability in what was there before.
+
+### Fixed — the old sign-in path could be replayed by any site you had signed into
+What shipped as "OAuth" verified almost nothing. The Google path asked `tokeninfo` whether an
+**access** token was valid and then trusted the email address in the reply. The Microsoft path handed
+a bearer token to Graph `/me` and trusted that. Neither asked the only question that matters: *who
+was this token issued for?*
+
+So any other site a user had signed into — anything that had requested `email` or `User.Read` — held
+a token it could replay against ScreenTinker and receive a session as that user. No password, no
+interaction from the victim.
+
+Identity now comes from an **ID token only**, with signature checked against the provider's JWKS and
+`iss`, `aud`, `azp`, `exp` and `nonce` all verified. One flow for every provider: Authorization Code
+with PKCE, completed server-side. Google and Microsoft became ordinary entries rather than special
+cases, which is what removed the two hand-written paths that were wrong.
+
+### Added — organizations bring their own identity provider
+Instance-wide providers stay the default and are now unlimited in number. On top of that an
+organization may configure its own provider, but only for domains it has **proved it controls** — a
+TXT record at `_screentinker-verify.<domain>`. An unverified claim lapses after eight hours and
+releases the domain, so a typo cannot park someone else's domain indefinitely.
+
+Proof by delegated name (CNAME) is refused outright. It would have required a wildcard zone we do not
+operate, and worse, it would turn a subdomain takeover into an apex takeover.
+
+**SSO-only** is available per organization: passwords refused, other providers refused, the instance
+Google button refused. Turning it *off* again needs a platform admin to approve the request, so one
+compromised org admin cannot quietly reopen password login. Break-glass for a platform admin is the
+correct password and nothing else — and a wrong password returns the same 403 everyone else gets, so
+it cannot be used to discover whether an account exists.
+
+With no SSO environment variables set, the product behaves exactly as it did before. That was
+verified in a browser, not merely reasoned about.
+
+### Added — organizations may re-enable same-origin widgets, deliberately
+Widget isolation removed `allow-same-origin`, which also broke embedding for sites that enforce strict
+CORS. There is now an org-level switch to put it back, behind a modal that requires the operator to
+type an acknowledgement, with a persistent banner while it is on. Enabling it needs an organization
+owner or admin — a workspace admin is deliberately not enough — and the change is written to the
+activity log. Contributed by @ChrisChrome.
+
+The **widget editor's Preview is excluded** from that switch. Preview renders inside the dashboard,
+where the admin's session token lives, so honouring the setting there would have let anyone who can
+author a widget lift the session of whichever admin clicked Preview. The setting exists so *displays*
+can embed origin-strict sites; a display holds a device token, an admin's browser does not.
+
+### Fixed — RSS tickers ran at a speed that depended on how much news there was
+`scroll_speed` was wired straight into `animation-duration`, so it set a fixed total time for the
+whole strip to cross the screen regardless of length. A feed with twenty items was dragged past in
+the same seconds as a feed with one — too fast to read, and it appeared to jump back to the start.
+It now calibrates a constant pixels-per-second rate, so more items simply take proportionally longer
+and every item scrolls fully into and out of view. Contributed by @ChrisChrome.
+
+### Fixed — user-controlled text is escaped where it actually reaches HTML
+An audit pass over the frontend's HTML sinks, escaping the ones that receive user-controlled data.
+Also in this release: dashboard banners no longer overlap the sidebar, shift the layout or vanish
+when switching views, and the main content no longer collapses to a narrow column.
+
+### Known limitations in this alpha
+Deliberately not resolved yet, and worth knowing before testing against them:
+
+- Enabling SSO-only **clears the passwords** of members at verified domains. That is irreversible
+  without a reset.
+- The SSO-only removal queue is an availability dependency on the operator: if nobody approves, the
+  organization stays SSO-only.
+- `landing.html` still interpolates plan names into HTML without escaping. Those values come from
+  the plans table rather than from end users, so it is a loose end rather than an exposure.
+- `/api/provision` is limited to 5/min, so a twenty-display install day takes four minutes of waiting.
+  Pre-existing, unchanged by this release.
+
 ## 1.9.33
 
 A patch off 1.9.32. The headline is a boot-time crash that could brick a display permanently — a
