@@ -273,6 +273,49 @@ function notifyOperatorOfClaim(req, { domains, orgId, providerName }) {
   }
 }
 
+/*
+ * Tell the operator that a customer wants password login re-opened.
+ *
+ * The mail deliberately carries NO action link. A token that acts on its own turns every forwarded,
+ * archived or auto-previewed copy of this message into a way to switch off a customer's single
+ * sign-on; the decision belongs to a signed-in platform admin, so the mail only says where to make
+ * it. Logged unconditionally, because an instance with no mail transport still needs a record that
+ * somebody asked.
+ */
+function notifyOperatorOfRemovalRequest(req, { id, orgId, orgName, reason }) {
+  try {
+    const who = req.user && req.user.email ? req.user.email : 'an administrator';
+    console.warn(`[org-sso] SSO-ONLY REMOVAL REQUESTED for org ${orgName || orgId} (${orgId}) by ${who} — request ${id}`);
+    if (!emailSvc.isConfigured()) return;
+    const admins = db.prepare("SELECT email FROM users WHERE role = 'platform_admin' AND COALESCE(email_alerts, 1) = 1").all();
+    if (!admins.length) return;
+    const body = [
+      `${who} has asked to stop requiring single sign-on for ${orgName || orgId}.`,
+      '',
+      'Approving this RE-OPENS password sign-in for everyone at that organization\u2019s verified',
+      'domains. Until it is approved, nothing changes.',
+      '',
+      reason ? `Reason given: ${reason}` : 'No reason was given.',
+      '',
+      `Organization: ${orgName || ''} (${orgId})`,
+      `Request:      ${id}`,
+      '',
+      'Review it in ScreenTinker under Admin. There is no link in this email on purpose — the',
+      'decision has to be made while signed in as a platform admin, so a forwarded copy of this',
+      'message cannot turn off a customer\u2019s single sign-on.',
+    ].join('\n');
+    for (const a of admins) {
+      Promise.resolve(emailSvc.sendEmail({
+        to: a.email,
+        subject: `[ScreenTinker] Approval needed: stop requiring SSO for ${orgName || orgId}`,
+        text: body,
+      })).catch((e) => console.error('[org-sso] removal notification failed:', e && e.message));
+    }
+  } catch (e) {
+    console.error('[org-sso] removal notification failed:', e && e.message);
+  }
+}
+
 /** A provider's domains, with the DNS record each unverified one still needs. */
 function domainsFor(providerId) {
   return db.prepare('SELECT * FROM org_sso_domains WHERE provider_id = ? ORDER BY domain').all(providerId)
@@ -595,6 +638,133 @@ router.post('/:orgId/sso/:id/domains/:domain/verify', requireOrgAdmin, requireVe
     ...domainVerify.instructions(row.domain, row.token),
   });
 }));
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────
+ * SSO-only: requiring the organization's identity provider.
+ */
+
+/** Only a VERIFIED domain can compel anyone — see the note on ssoOnlyForEmail. */
+function verifiedDomainCount(orgId) {
+  return db.prepare(`
+    SELECT COUNT(*) AS n FROM org_sso_domains d
+      JOIN org_sso_providers p ON p.id = d.provider_id
+     WHERE d.organization_id = ? AND d.verified_at IS NOT NULL AND p.enabled = 1
+  `).get(orgId).n;
+}
+
+router.get('/:orgId/sso-only', requireOrgAdmin, (req, res) => {
+  const org = db.prepare('SELECT sso_only FROM organizations WHERE id = ?').get(req.orgId);
+  const pending = db.prepare(
+    "SELECT id, requested_by, reason, created_at FROM org_sso_only_requests WHERE organization_id = ? AND status = 'pending' ORDER BY created_at DESC"
+  ).get(req.orgId);
+  res.json({
+    sso_only: !!(org && org.sso_only),
+    verified_domains: verifiedDomainCount(req.orgId),
+    pending_removal_request: pending || null,
+  });
+});
+
+/*
+ * Turn it ON. An org admin does this alone: it can only ever reduce the ways into their own tenant,
+ * and the people affected are their own.
+ */
+router.post('/:orgId/sso-only', requireOrgAdmin, requireVerifiedAdmin, (req, res) => {
+  /*
+   * Refuse when nothing is proved. Otherwise an organization could switch off password login for
+   * accounts it cannot offer any other way in for — locking its own people out of a product they
+   * can then only reach by asking the operator to undo it.
+   */
+  if (!verifiedDomainCount(req.orgId)) {
+    return res.status(400).json({
+      error: 'Verify at least one sign-in domain before requiring single sign-on — otherwise nobody could sign in.',
+      code: 'no_verified_domain',
+    });
+  }
+  db.prepare('UPDATE organizations SET sso_only = 1 WHERE id = ?').run(req.orgId);
+  logActivity(req.user.id, 'org_sso_only_enabled', `org=${req.orgId}`, null, getClientIp(req));
+  console.log(`[org-sso] SSO-only ENABLED for org ${req.orgId} by ${req.user.email}`);
+  res.json({ sso_only: true });
+});
+
+/*
+ * Turning it OFF is a REQUEST, not a switch.
+ *
+ * This is the direction that re-opens password login, so it is the direction an attacker who has
+ * taken an org admin would take, and it is also what a customer will demand at their worst moment —
+ * identity provider down, nobody can work — which is precisely when a self-service toggle gets
+ * flipped without thinking. A platform admin has to approve it.
+ */
+router.post('/:orgId/sso-only/removal-request', requireOrgAdmin, requireVerifiedAdmin, (req, res) => {
+  const org = db.prepare('SELECT sso_only, name FROM organizations WHERE id = ?').get(req.orgId);
+  if (!org || !org.sso_only) return res.status(400).json({ error: 'Single sign-on is not required for this organization' });
+
+  const existing = db.prepare("SELECT id FROM org_sso_only_requests WHERE organization_id = ? AND status = 'pending'").get(req.orgId);
+  if (existing) return res.status(409).json({ error: 'A removal request is already awaiting approval', request_id: existing.id });
+
+  const id = crypto.randomUUID();
+  const reason = String((req.body && req.body.reason) || '').slice(0, 500);
+  db.prepare('INSERT INTO org_sso_only_requests (id, organization_id, requested_by, reason) VALUES (?, ?, ?, ?)')
+    .run(id, req.orgId, req.user.id, reason);
+
+  notifyOperatorOfRemovalRequest(req, { id, orgId: req.orgId, orgName: org.name, reason });
+  logActivity(req.user.id, 'org_sso_only_removal_requested', `org=${req.orgId} id=${id}`, null, getClientIp(req));
+  res.status(202).json({ status: 'pending', request_id: id });
+});
+
+/** Withdrawing your own request needs nobody's approval — it only ever keeps SSO required. */
+router.delete('/:orgId/sso-only/removal-request/:id', requireOrgAdmin, requireVerifiedAdmin, (req, res) => {
+  const row = db.prepare("SELECT * FROM org_sso_only_requests WHERE id = ? AND organization_id = ? AND status = 'pending'")
+    .get(req.params.id, req.orgId);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  db.prepare("UPDATE org_sso_only_requests SET status = 'cancelled', decided_at = strftime('%s','now'), decided_by = ? WHERE id = ?")
+    .run(req.user.id, row.id);
+  res.json({ status: 'cancelled' });
+});
+
+/*
+ * The operator's side.
+ *
+ * Approval is an authenticated platform_admin action, NOT a link in an email: a token that acts on
+ * its own turns every forwarded or archived message into a way to re-open password login for a
+ * customer. The mail says what happened and where to go; the decision is made signed in.
+ */
+function requirePlatformAdmin(req, res, next) {
+  if (!req.user || req.user.role !== 'platform_admin') return res.status(404).json({ error: 'Not found' });
+  next();
+}
+
+router.get('/sso-only/removal-requests', requirePlatformAdmin, (req, res) => {
+  const rows = db.prepare(`
+    SELECT r.id, r.organization_id, r.reason, r.created_at, o.name AS organization_name, u.email AS requested_by_email
+      FROM org_sso_only_requests r
+      LEFT JOIN organizations o ON o.id = r.organization_id
+      LEFT JOIN users u ON u.id = r.requested_by
+     WHERE r.status = 'pending'
+     ORDER BY r.created_at
+  `).all();
+  res.json({ requests: rows });
+});
+
+router.post('/sso-only/removal-requests/:id/:decision', requirePlatformAdmin, (req, res) => {
+  const decision = req.params.decision === 'approve' ? 'approved'
+    : req.params.decision === 'reject' ? 'rejected' : null;
+  if (!decision) return res.status(400).json({ error: 'decision must be approve or reject' });
+
+  const row = db.prepare("SELECT * FROM org_sso_only_requests WHERE id = ? AND status = 'pending'").get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+
+  const note = String((req.body && req.body.note) || '').slice(0, 500);
+  db.transaction(() => {
+    db.prepare("UPDATE org_sso_only_requests SET status = ?, decided_by = ?, decided_at = strftime('%s','now'), decision_note = ? WHERE id = ?")
+      .run(decision, req.user.id, note, row.id);
+    // Only an approval changes anything. A rejection leaves SSO required, which is the safe state.
+    if (decision === 'approved') db.prepare('UPDATE organizations SET sso_only = 0 WHERE id = ?').run(row.organization_id);
+  })();
+
+  logActivity(req.user.id, `org_sso_only_${decision}`, `org=${row.organization_id} id=${row.id}`, null, getClientIp(req));
+  console.log(`[org-sso] SSO-only removal ${decision} for org ${row.organization_id} by ${req.user.email}`);
+  res.json({ status: decision, organization_id: row.organization_id });
+});
 
 router.delete('/:orgId/sso/:id', requireOrgAdmin, requireVerifiedAdmin, (req, res) => {
   const existing = db.prepare('SELECT * FROM org_sso_providers WHERE id = ? AND organization_id = ?').get(req.params.id, req.orgId);

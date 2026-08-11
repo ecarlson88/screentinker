@@ -298,4 +298,34 @@ function forEmail(email) {
   return null;
 }
 
-module.exports = { list, get, publicList, getOrgProvider, ownerOf, forEmail, DEFAULT_SCOPES, SLUG_RE };
+/**
+ * Is this address inside an organization that REQUIRES its identity provider?
+ *
+ * Only a VERIFIED domain can compel anyone: an org must not be able to switch off password login
+ * for a domain it merely typed, which would be a denial-of-service against a company it has nothing
+ * to do with. Enabled providers only, for the same reason a disabled provider routes nobody.
+ */
+function ssoOnlyForEmail(email) {
+  const conn = db();
+  if (!conn) return null;
+  const at = String(email || '').lastIndexOf('@');
+  if (at === -1) return null;
+  const domain = String(email).slice(at + 1).toLowerCase().trim();
+  if (!domain) return null;
+  try {
+    return conn.prepare(`
+      SELECT o.id AS organization_id, o.name AS organization_name, p.slug
+        FROM org_sso_domains d
+        JOIN org_sso_providers p ON p.id = d.provider_id
+        JOIN organizations o ON o.id = d.organization_id
+       WHERE d.domain = ? AND d.verified_at IS NOT NULL AND p.enabled = 1 AND o.sso_only = 1
+    `).get(domain) || null;
+  } catch (e) {
+    if (/no such table|no such column/i.test(e.message)) return null;
+    throw e;
+  }
+}
+
+module.exports = {
+  list, get, publicList, getOrgProvider, ownerOf, forEmail, ssoOnlyForEmail, DEFAULT_SCOPES, SLUG_RE,
+};

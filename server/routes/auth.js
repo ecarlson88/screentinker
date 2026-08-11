@@ -172,6 +172,33 @@ router.post('/login', (req, res) => {
     return res.status(401).json({ error: 'Invalid email or password' });
   }
 
+  /*
+   * SSO-ONLY. The organization that owns this VERIFIED domain requires its identity provider, so a
+   * password is not an alternative way in — otherwise the MFA, conditional access and instant
+   * deprovisioning the customer bought are all reachable around.
+   *
+   * ⚠️ platform_admin is exempt, and that exemption is load-bearing rather than a convenience. The
+   * operator is the one who approves turning this OFF. If the operator's own address sits at an
+   * SSO-only domain and that identity provider breaks, nobody can sign in to approve anything and
+   * the instance is bricked with no path out. The exemption is the break-glass; it applies to the
+   * people who run the server, never to a customer's own admins.
+   *
+   * Said plainly rather than as "invalid email or password": this is not a credential failure and
+   * pretending otherwise sends the user to reset a password that will never work. The domain
+   * already answered `sso: true` publicly, so naming it reveals nothing new.
+   */
+  if (user.role !== 'platform_admin') {
+    const enforced = oidcProviders.ssoOnlyForEmail(user.email);
+    if (enforced) {
+      logFailedLogin(email, getClientIp(req), 'Password login refused: organization requires SSO');
+      return res.status(403).json({
+        error: 'Your organization requires single sign-on. Use the single sign-on button to continue.',
+        code: 'sso_required',
+        sso_start: '/api/auth/sso/start',
+      });
+    }
+  }
+
   // Per-ACCOUNT brute-force lockout (lib/login-lockout), on top of the per-IP limiter in
   // server.js. Checked BEFORE bcrypt so a locked account costs no hashing work.
   //
@@ -1051,7 +1078,20 @@ router.get('/providers', (req, res) => {
  * walked to enumerate users.
  */
 router.get('/sso/discover', (req, res) => {
-  res.json({ sso: !!oidcProviders.forEmail(req.query.email) });
+  const provider = oidcProviders.forEmail(req.query.email);
+  /*
+   * `required` says the organization has turned off password sign-in for this domain, so the login
+   * page can hide the password box instead of letting someone type a password that is going to be
+   * refused. It is only ever present when `sso` is already true, so it tells an outsider nothing
+   * they could not learn by asking the same question one field earlier.
+   *
+   * ⚠️ Presentation only. The refusal is enforced in POST /login — a hidden field is a courtesy,
+   * not a control, and anyone can post the form directly.
+   */
+  res.json({
+    sso: !!provider,
+    required: provider ? !!oidcProviders.ssoOnlyForEmail(req.query.email) : false,
+  });
 });
 
 /*
@@ -1191,6 +1231,22 @@ router.get('/oidc/:slug/callback', asyncRoute(async (req, res) => {
    * The domains are the VERIFIED ones — proved by a DNS record published in the domain itself — so
    * this is confinement to what the tenant demonstrably controls, not to what they typed.
    */
+  /*
+   * SSO-ONLY applies to EVERY route in, not just the password box.
+   *
+   * Confinement stops an org provider speaking for domains it does not own. This is the mirror
+   * image: when an organization requires its identity provider, no OTHER provider may speak for
+   * its people either — including the instance's own Google or Microsoft, which are not
+   * domain-confined and would otherwise be an open side door around the MFA and deprovisioning the
+   * customer turned this on for. Blocking passwords while leaving "Continue with Google" is not
+   * requiring single sign-on; it is renaming the bypass.
+   */
+  const enforcedOrg = oidcProviders.ssoOnlyForEmail(email);
+  if (enforcedOrg && enforcedOrg.slug !== provider.slug) {
+    console.warn(`[oidc] ${provider.slug} asserted ${email}, but that organization requires ${enforcedOrg.slug}`);
+    return backToApp(res, { sso_error: 'sso_required' });
+  }
+
   if (!emailAllowedForProvider(provider, email)) {
     console.warn(`[oidc] ${provider.slug} asserted ${email}, outside its verified domains [${provider.emailDomains}]`);
     return backToApp(res, { sso_error: 'domain_not_allowed' });

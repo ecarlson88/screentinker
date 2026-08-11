@@ -105,7 +105,7 @@ export async function render(container) {
               <input type="email" id="loginEmail" class="input" placeholder="${t('auth.placeholder_email')}" autocomplete="email">
             </div>
             <div class="form-group">
-              <label>${t('auth.password')}</label>
+              <label id="loginPasswordLabel">${t('auth.password')}</label>
             <!-- Filled in only when the typed email belongs to an organization that has configured
                  its own identity provider. A customer's IdP is never listed to everyone: the button
                  appears for the people it belongs to and nobody else, which also keeps the customer
@@ -195,6 +195,9 @@ export async function render(container) {
                third-party script origin. Google and Microsoft are ordinary entries in this list.
                The icon is chosen by slug where we have one and falls back to a generic mark, so a
                self-hoster's Keycloak or Authentik still gets a real-looking button. -->
+          <!-- Wrapped so the whole set can be hidden at once: an organization that REQUIRES its own
+               identity provider must not be shown the operator's, which are not domain-confined. -->
+          <div id="instanceProviders">
           ${(config.providers || []).map((p) => `
           <a class="btn btn-secondary" href="/api/auth/oidc/${encodeURIComponent(p.slug)}/start"
              id="sso-${esc(p.slug)}"
@@ -203,6 +206,7 @@ export async function render(container) {
             ${esc(t('auth.signin_with', { provider: p.name }))}
           </a>
           `).join('')}
+          </div>
           </div>
         </div>
 
@@ -306,6 +310,12 @@ function setupHandlers(config, isSetup) {
         body: JSON.stringify({ email, password })
       });
       const data = await res.json();
+      /*
+       * The organization requires its identity provider, so this is not a credential failure and
+       * must not read like one — "invalid password" sends the user to reset a password that will
+       * never work again. Point them at the control that does work.
+       */
+      if (!res.ok && data.code === 'sso_required') { showError(t('auth.sso_required')); return; }
       if (!res.ok) { showError(data.error); return; }
       // Unverified account (hosted hard-gate): no session — prompt to check email.
       if (data.verification_required) { showVerifyNotice(data.email || email); return; }
@@ -497,13 +507,49 @@ function setupHandlers(config, isSetup) {
   let lastDomainAsked = '';
   const orgSlot = () => document.getElementById('orgSsoSlot');
 
+  /*
+   * Show or hide the password half of the sign-in form.
+   *
+   * Presentation only — the server refuses a password for these accounts regardless. Restoring it
+   * on every negative answer matters as much as hiding it: someone who types an SSO-only address,
+   * then corrects it to their own, must get the password box back.
+   */
+  function setPasswordVisible(visible) {
+    /*
+     * ⚠️ Hide the password FIELD, never its .form-group — the organization SSO slot lives inside
+     * that same group, so hiding the container took the single sign-on button down with it and left
+     * a login page whose only action was "Create Account". Found by looking at a screenshot.
+     */
+    const show = visible ? '' : 'none';
+    for (const id of ['loginPassword', 'loginPasswordLabel', 'loginBtn']) {
+      const el = document.getElementById(id);
+      if (el) el.style.display = show;
+    }
+    /*
+     * The instance's own providers go too. They are the operator's, not this organization's, and
+     * they are not domain-confined — so offering "Continue with Google" to someone whose company
+     * requires its own identity provider is offering them the bypass. The server refuses it either
+     * way; this stops the page inviting it.
+     */
+    const instance = document.getElementById('instanceProviders');
+    if (instance) instance.style.display = show;
+    // "Forgot your password?" sits in its own <p>; hide the wrapper so no empty gap is left.
+    const forgot = document.getElementById('forgotLink');
+    if (forgot) {
+      const wrap = forgot.parentElement && forgot.parentElement.tagName === 'P' ? forgot.parentElement : forgot;
+      wrap.style.display = show;
+    }
+  }
+
   async function lookupOrgSso(email) {
     const at = String(email || '').lastIndexOf('@');
     const domain = at === -1 ? '' : email.slice(at + 1).trim().toLowerCase();
     const slot = orgSlot();
     if (!slot) return;
     // Nothing to ask about until there is a domain with a dot in it.
-    if (!domain || !domain.includes('.')) { slot.style.display = 'none'; slot.innerHTML = ''; lastDomainAsked = ''; return; }
+    if (!domain || !domain.includes('.')) {
+      slot.style.display = 'none'; slot.innerHTML = ''; lastDomainAsked = ''; setPasswordVisible(true); return;
+    }
     if (domain === lastDomainAsked) return;
     try {
       const res = await fetch(`/api/auth/sso/discover?email=${encodeURIComponent(email)}`);
@@ -511,7 +557,14 @@ function setupHandlers(config, isSetup) {
       // Remembered only after a SUCCESSFUL answer. Recording it before the fetch meant a 5xx or a
       // tripped rate limit poisoned that domain for the rest of the page's life.
       lastDomainAsked = domain;
-      if (!data.sso) { slot.style.display = 'none'; slot.innerHTML = ''; return; }
+      if (!data.sso) { slot.style.display = 'none'; slot.innerHTML = ''; setPasswordVisible(true); return; }
+      /*
+       * When the organization REQUIRES its identity provider, the password box is not merely going
+       * to fail — it is the wrong thing to offer. Showing it invites someone to type a password,
+       * be refused, and go and reset a password that will never work again. Hidden, not disabled,
+       * so there is one obvious way forward.
+       */
+      setPasswordVisible(!data.required);
       /*
        * A FORM, not a link, and a deliberately generic label.
        *
@@ -532,9 +585,11 @@ function setupHandlers(config, isSetup) {
         </div>`;
       slot.style.display = '';
     } catch {
-      // A failed lookup must never block a password login — the form still works.
+      // A failed lookup must never block a password login — the form still works, and the password
+      // box comes back rather than leaving someone staring at a form with no way to submit it.
       slot.style.display = 'none';
       slot.innerHTML = '';
+      setPasswordVisible(true);
     }
   }
 

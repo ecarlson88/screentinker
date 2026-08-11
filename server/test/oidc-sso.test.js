@@ -294,6 +294,7 @@ function orgDb() {
       scopes TEXT NOT NULL DEFAULT 'openid email profile', email_domains TEXT NOT NULL DEFAULT '',
       enabled INTEGER NOT NULL DEFAULT 1,
       created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE organizations (id TEXT PRIMARY KEY, name TEXT, sso_only INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE org_sso_domains (
       id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, provider_id TEXT, domain TEXT NOT NULL UNIQUE,
       token TEXT NOT NULL, token_issued_at INTEGER NOT NULL DEFAULT 0, verified_at INTEGER,
@@ -311,6 +312,8 @@ function withOrgDb(rows, fn) {
   const d = orgDb();
   let n = 0;
   for (const r of rows) {
+    d.prepare('INSERT OR IGNORE INTO organizations (id, name, sso_only) VALUES (?, ?, ?)')
+      .run(r.org, r.org, r.ssoOnly ? 1 : 0);
     const typed = [...(r.domains || '').split(','), ...(r.pending || '').split(',')].filter(Boolean).join(',');
     d.prepare(`INSERT INTO org_sso_providers (id, organization_id, slug, name, issuer, client_id, email_domains, enabled)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -717,4 +720,55 @@ test('a user object never leaves the server carrying a reset or verify hash', ()
   }
   // And nothing may hand-roll the old partial strip again.
   assert.ok(!/totp_last_step,\s*\.\.\.safeUser/.test(src), 'use publicUser(), not an inline destructure');
+});
+
+// ---------------------------------------------------------------------------------------------
+// SSO-only: an organization requiring its own identity provider.
+
+test('SSO-ONLY applies to a VERIFIED domain', () => {
+  withOrgDb([{ id: '1', org: 'org-a', slug: 'orgaaa', name: 'Acme', domains: 'acme.test', ssoOnly: true }], (m) => {
+    const hit = m.ssoOnlyForEmail('staff@acme.test');
+    assert.ok(hit, 'password login must be refused for this address');
+    assert.equal(hit.organization_id, 'org-a');
+    assert.equal(m.ssoOnlyForEmail('staff@ACME.TEST').organization_id, 'org-a', 'case-insensitive');
+    assert.equal(m.ssoOnlyForEmail('someone@elsewhere.test'), null, 'and nobody else is affected');
+  });
+});
+
+test('SSO-ONLY CANNOT be imposed through a domain that was only claimed', () => {
+  /*
+   * The dangerous shape: switching off password login for a domain the tenant never proved would
+   * be a denial-of-service against a company they have nothing to do with — every account at that
+   * address locked out of a product the squatter does not own.
+   */
+  withOrgDb([{ id: '1', org: 'org-x', slug: 'orgxxx', name: 'Squatter', pending: 'victim-corp.test', ssoOnly: true }], (m) => {
+    assert.equal(m.ssoOnlyForEmail('ceo@victim-corp.test'), null, 'an unproved domain compels nobody');
+  });
+});
+
+test('SSO-ONLY stops applying when the provider is disabled', () => {
+  // Otherwise disabling a broken provider would leave its users with no way in at all: no SSO
+  // (disabled) and no password (still enforced).
+  withOrgDb([{ id: '1', org: 'org-a', slug: 'orgaaa', name: 'Acme', domains: 'acme.test', enabled: 0, ssoOnly: true }], (m) => {
+    assert.equal(m.ssoOnlyForEmail('staff@acme.test'), null);
+  });
+});
+
+test('SSO-ONLY is off unless the organization turned it on', () => {
+  withOrgDb([{ id: '1', org: 'org-a', slug: 'orgaaa', name: 'Acme', domains: 'acme.test' }], (m) => {
+    assert.equal(m.ssoOnlyForEmail('staff@acme.test'), null, 'having SSO is not the same as requiring it');
+  });
+});
+
+test('the login gate exempts platform_admin, and that exemption is deliberate', () => {
+  /*
+   * The operator approves turning SSO-only OFF. If the operator's own address sat at an SSO-only
+   * domain and that identity provider broke, nobody could sign in to approve anything and the
+   * instance would be bricked. Pinned as source because it is a security-relevant exemption that
+   * must not be "tidied away" by someone who reads it as a convenience.
+   */
+  const src = fs.readFileSync(require.resolve('../routes/auth.js'), 'utf8');
+  assert.match(src, /user\.role !== 'platform_admin'[\s\S]{0,200}ssoOnlyForEmail/,
+    'the break-glass exemption must guard the ssoOnlyForEmail check');
+  assert.match(src, /code: 'sso_required'/, 'and the refusal must be distinguishable from a bad password');
 });

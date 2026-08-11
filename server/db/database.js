@@ -470,6 +470,32 @@ const migrations = [
   )`,
   "CREATE INDEX IF NOT EXISTS idx_org_sso_domains_org ON org_sso_domains(organization_id)",
   "CREATE INDEX IF NOT EXISTS idx_org_sso_domains_provider ON org_sso_domains(provider_id)",
+  /*
+   * SSO-ONLY: an organization may require its people to use its identity provider, so a password
+   * is no longer an alternative way in. That is the point of buying SSO — the IdP holds the MFA,
+   * the conditional access and the instant deprovisioning, and a password box beside it is a way
+   * around all three.
+   *
+   * ⚠️ Asymmetric on purpose. Turning it ON is the safe direction and an org admin does it alone.
+   * Turning it OFF is how a compromised admin would re-open password login, and it is also what
+   * an org will demand at its worst moment — IdP down, nobody can work — which is exactly when a
+   * self-service switch gets flipped under pressure. So removal goes through the operator: the
+   * request is recorded here and a platform admin has to approve it.
+   */
+  "ALTER TABLE organizations ADD COLUMN sso_only INTEGER NOT NULL DEFAULT 0",
+  `CREATE TABLE IF NOT EXISTS org_sso_only_requests (
+    id                 TEXT PRIMARY KEY,
+    organization_id    TEXT NOT NULL,
+    requested_by       TEXT,
+    reason             TEXT,
+    status             TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected | cancelled
+    decided_by         TEXT,
+    decided_at         INTEGER,
+    decision_note      TEXT,
+    created_at         INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
+  )`,
+  "CREATE INDEX IF NOT EXISTS idx_sso_only_req_status ON org_sso_only_requests(status, organization_id)",
   "ALTER TABLE device_telemetry ADD COLUMN attached_display TEXT",
   "ALTER TABLE device_telemetry ADD COLUMN video_mode TEXT",
   // Panel temperature in Celsius. REAL because the sensor reports fractions, and nullable because

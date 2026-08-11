@@ -693,6 +693,16 @@ export async function render(container) {
       return;
     }
 
+    // Requiring SSO is a separate decision from having it, so it gets its own block rather than
+    // hiding inside a provider — an organization may have several providers and one answer.
+    let onlyState = null;
+    try {
+      const r = await fetch(`/api/organizations/${orgId}/sso-only`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+      });
+      if (r.ok) onlyState = await r.json();
+    } catch { /* the providers still render; the toggle simply does not appear */ }
+
     const origin = `${window.location.protocol}//${window.location.host}`;
     listEl.innerHTML = providers.map((p) => `
       <div style="border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin-bottom:8px">
@@ -793,6 +803,61 @@ export async function render(container) {
      * edited DNS and wants an answer, and a failure has to say WHICH failure — not published yet,
      * published wrong, or the claim expired and the record has changed underneath them.
      */
+    if (onlyState) {
+      const pend = onlyState.pending_removal_request;
+      const box = document.createElement('div');
+      box.style.cssText = 'border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin-top:4px';
+      box.innerHTML = `
+        <div style="font-weight:600;margin-bottom:4px">${esc(t('sso.only_heading'))}</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">${esc(t('sso.only_help'))}</div>
+        ${onlyState.sso_only ? `
+          <div style="font-size:13px;margin-bottom:8px">✅ ${esc(t('sso.only_on'))}</div>
+          ${pend
+            ? `<div style="font-size:12px;color:var(--warning,#b45309)">⏳ ${esc(t('sso.only_pending'))}</div>
+               <button class="btn btn-secondary btn-sm" id="ssoOnlyCancel" data-req="${esc(pend.id)}" style="margin-top:6px">${esc(t('sso.only_cancel'))}</button>`
+            : `<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">${esc(t('sso.only_remove_help'))}</div>
+               <button class="btn btn-secondary btn-sm" id="ssoOnlyRequest">${esc(t('sso.only_request'))}</button>`}
+        ` : `
+          <div style="font-size:13px;margin-bottom:8px">${esc(t('sso.only_off'))}</div>
+          ${onlyState.verified_domains
+            ? `<button class="btn btn-secondary btn-sm" id="ssoOnlyEnable">${esc(t('sso.only_enable'))}</button>`
+            : `<div style="font-size:12px;color:var(--warning,#b45309)">⚠️ ${esc(t('sso.only_needs_domain'))}</div>`}
+        `}`;
+      listEl.appendChild(box);
+
+      const post = async (url, body, method = 'POST') => {
+        const r = await fetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` },
+          body: body ? JSON.stringify(body) : undefined,
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) { showToast(j.error || t('sso.only_failed'), 'error'); return null; }
+        return j;
+      };
+
+      const enableBtn = box.querySelector('#ssoOnlyEnable');
+      if (enableBtn) enableBtn.addEventListener('click', async () => {
+        // Confirmed, because it removes the only way in for everyone at these domains, and the way
+        // back needs the operator rather than this button.
+        if (!window.confirm(t('sso.only_confirm'))) return;
+        if (await post(`/api/organizations/${orgId}/sso-only`)) { showToast(t('sso.only_on'), 'success'); await loadSso(); }
+      });
+
+      const reqBtn = box.querySelector('#ssoOnlyRequest');
+      if (reqBtn) reqBtn.addEventListener('click', async () => {
+        const reason = window.prompt(t('sso.only_reason_prompt')) || '';
+        const r = await post(`/api/organizations/${orgId}/sso-only/removal-request`, { reason });
+        if (r) { showToast(t('sso.only_requested'), 'success'); await loadSso(); }
+      });
+
+      const cancelBtn = box.querySelector('#ssoOnlyCancel');
+      if (cancelBtn) cancelBtn.addEventListener('click', async () => {
+        const r = await post(`/api/organizations/${orgId}/sso-only/removal-request/${cancelBtn.dataset.req}`, null, 'DELETE');
+        if (r) { showToast(t('sso.only_cancelled'), 'success'); await loadSso(); }
+      });
+    }
+
     listEl.querySelectorAll('[data-sso-verify]').forEach((btn) => {
       btn.addEventListener('click', async () => {
         const id = btn.dataset.ssoVerify;
