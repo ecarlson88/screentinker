@@ -518,6 +518,24 @@ own admins.
 locked out until an operator acts. That is the intended trade — deliberate friction on the dangerous
 direction — but it should be a decision, not a surprise.
 
+#### Dependency preflight on boot
+
+Before anything else is loaded, the server checks that the packages this build declares are actually
+installed and that the native database module loads under the running Node. If either is wrong it
+repairs it (`npm install --omit=dev`, or `npm rebuild better-sqlite3`) and continues; if it cannot,
+it exits saying what to run rather than dying on a `MODULE_NOT_FOUND` naming a file.
+
+`scripts/upgrade.sh` already installs dependencies, so this is not for the normal path. It is for
+the ways a box ends up with the wrong `node_modules`:
+
+- **rolling back** to an older tag restores that tag's `package.json` but not its packages — and you
+  are rolling back because something is already wrong;
+- **upgrading Node** leaves `better-sqlite3` compiled against the previous ABI, which fails in a way
+  that reads like database corruption and is not.
+
+Set `ST_SKIP_DEP_PREFLIGHT=1` on an air-gapped host, or anywhere you manage `node_modules` yourself
+and do not want a boot reaching for the registry.
+
 #### Email (Microsoft Graph or SMTP)
 
 Email powers offline alerts, welcome/signup mail, admin notifications, and password reset. Two interchangeable transports are supported, selected by `EMAIL_TRANSPORT`:

@@ -1,3 +1,14 @@
+/*
+ * FIRST, before any dependency is required: make sure they are installed and loadable.
+ *
+ * A rollback restores an older package.json but not its packages, and a Node upgrade leaves the
+ * native database module compiled against the wrong ABI. Both present as a server that will not
+ * start, with an error naming a file rather than the action needed — and the rollback case happens
+ * precisely when something else has already gone wrong. Repairing takes seconds; diagnosing at 2am
+ * does not. ST_SKIP_DEP_PREFLIGHT=1 turns it off.
+ */
+require('./lib/preflight-deps').preflight();
+
 const express = require('express');
 const http = require('http');
 const https = require('https');
