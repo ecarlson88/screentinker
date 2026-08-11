@@ -743,8 +743,12 @@ export async function render(container) {
               ${d.verified ? '' : `
                 <div style="margin-top:6px;color:var(--text-muted)">${esc(t('sso.dns_instructions'))}</div>
                 <code style="display:block;word-break:break-all;padding:6px;background:var(--bg-secondary);border-radius:4px;margin-top:4px">${esc(d.record_name)}  TXT  ${esc(d.txt_value)}</code>
-                ${d.last_error ? `<div style="margin-top:4px;color:var(--danger,#b91c1c)">${esc(d.last_error)}</div>` : ''}`}
-              <div id="ssoVerify-${esc(p.id)}-${di}" style="margin-top:4px"></div>
+`}
+              <!-- ONE place for the outcome. The last failure is persisted server-side and was
+                   rendered here, while the click handler wrote the live result into a second
+                   element below it — so retrying showed the identical sentence twice, in two
+                   different colours. The handler replaces this element's text instead. -->
+              <div id="ssoVerify-${esc(p.id)}-${di}" style="margin-top:4px;color:var(--danger,#b91c1c)">${d.verified ? '' : esc(d.last_error || '')}</div>
             </div>`).join('')}
         </div>` : ''}
 
@@ -797,7 +801,7 @@ export async function render(container) {
         // `a-b-test`, and getElementById would put one domain's answer in the other's box.
         const out = document.getElementById(`ssoVerify-${id}-${btn.dataset.di}`);
         btn.disabled = true;
-        if (out) out.textContent = t('sso.verifying');
+        if (out) { out.style.color = 'var(--text-muted)'; out.textContent = t('sso.verifying'); }
         try {
           const res = await fetch(`/api/organizations/${orgId}/sso/${id}/domains/${encodeURIComponent(domain)}/verify`, {
             method: 'POST',
@@ -816,9 +820,9 @@ export async function render(container) {
             await loadSso();
             return;
           }
-          if (out) out.textContent = body.error || t('sso.verify_failed');
+          if (out) { out.style.color = 'var(--danger,#b91c1c)'; out.textContent = body.error || t('sso.verify_failed'); }
         } catch {
-          if (out) out.textContent = t('sso.verify_failed');
+          if (out) { out.style.color = 'var(--danger,#b91c1c)'; out.textContent = t('sso.verify_failed'); }
         } finally {
           btn.disabled = false;
         }
