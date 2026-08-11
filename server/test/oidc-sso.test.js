@@ -768,7 +768,7 @@ test('the login gate exempts platform_admin, and that exemption is deliberate', 
    * must not be "tidied away" by someone who reads it as a convenience.
    */
   const src = fs.readFileSync(require.resolve('../routes/auth.js'), 'utf8');
-  assert.match(src, /user\.role !== 'platform_admin'[\s\S]{0,200}ssoOnlyForEmail/,
-    'the break-glass exemption must guard the ssoOnlyForEmail check');
+  assert.match(src, /user\.role !== 'platform_admin'[\s\S]{0,600}ssoOnlyForUser/,
+    'the break-glass exemption must guard the SSO-only check');
   assert.match(src, /code: 'sso_required'/, 'and the refusal must be distinguishable from a bad password');
 });

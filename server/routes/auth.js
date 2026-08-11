@@ -188,7 +188,21 @@ router.post('/login', (req, res) => {
    * already answered `sso: true` publicly, so naming it reveals nothing new.
    */
   if (user.role !== 'platform_admin') {
-    const enforced = oidcProviders.ssoOnlyForEmail(user.email);
+    /*
+     * A throw here means we could not determine the answer (schema drift, a broken read). Treat
+     * that as "SSO is required" rather than letting a 500 escape or, worse, letting the login
+     * through: the whole point of this gate is that a password must not be an alternative way in,
+     * and "we could not check" is not "there is nothing to check".
+     */
+    let enforced = null;
+    try {
+      // By MEMBERSHIP as well as by domain — an account inside the tenant at an outside address
+      // was the demonstrated way around this.
+      enforced = oidcProviders.ssoOnlyForUser(user);
+    } catch (e) {
+      console.error('[login] SSO-only status unavailable, refusing password login:', e && e.message);
+      enforced = { unavailable: true };
+    }
     if (enforced) {
       logFailedLogin(email, getClientIp(req), 'Password login refused: organization requires SSO');
       return res.status(403).json({

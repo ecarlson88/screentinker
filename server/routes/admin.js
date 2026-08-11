@@ -55,6 +55,32 @@ router.post('/users', (req, res) => {
   if (!canAdminWorkspace(db, req.user, ws)) {
     return res.status(403).json({ error: 'Admin access required' });
   }
+  /*
+   * ⚠️ An SSO-only organization must not have password accounts minted into it.
+   *
+   * This route creates a LOCAL account with an admin-chosen password, and it accepts any address —
+   * so on a tenant that requires single sign-on it was a one-call backdoor: create
+   * `contractor@somewhere-else.test` bound to the workspace, log in with the password, and every
+   * control the customer turned SSO-only on for is behind you. A review did exactly that, and the
+   * account it created could then mint another.
+   *
+   * platform_admin keeps the ability, because that is the operator break-glass — the same
+   * exemption the login gate makes, for the same reason.
+   */
+  if (req.user.role !== 'platform_admin' && ws.organization_id) {
+    // The table is absent on a single-tenant install; that simply means no organization requires
+    // single sign-on, so creation proceeds.
+    let org = null;
+    try { org = db.prepare('SELECT sso_only, name FROM organizations WHERE id = ?').get(ws.organization_id); }
+    catch { org = null; }
+    if (org && org.sso_only) {
+      return res.status(400).json({
+        error: `${org.name || 'This organization'} requires single sign-on, so password accounts cannot be created. Invite the person through your identity provider instead.`,
+        code: 'sso_only_org',
+      });
+    }
+  }
+
   // Stamp the target workspace so the activityLogger middleware (and our
   // explicit audit row) attribute to the right tenant.
   req.workspaceId = ws.id;

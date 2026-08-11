@@ -321,11 +321,64 @@ function ssoOnlyForEmail(email) {
        WHERE d.domain = ? AND d.verified_at IS NOT NULL AND p.enabled = 1 AND o.sso_only = 1
     `).get(domain) || null;
   } catch (e) {
-    if (/no such table|no such column/i.test(e.message)) return null;
+    /*
+     * ⚠️ FAIL CLOSED. This used to swallow `no such column` and return null — and null means "not
+     * SSO-only", i.e. password login proceeds. It is the single control stopping a password from
+     * bypassing a customer's identity provider, so a schema problem must never be the thing that
+     * quietly switches it off. The sibling forEmail() carries the same warning for the same reason.
+     *
+     * `no such table` on the DOMAINS table is different and genuinely means "this instance has no
+     * per-org SSO at all", so it stays a null.
+     */
+    /*
+     * "The feature is not installed" and "the schema drifted" are different answers.
+     *
+     * A missing per-org SSO table, or no organizations table at all, means this instance has no
+     * per-organization SSO — nothing is being bypassed, so null is correct and a single-tenant
+     * install must keep working. A missing sso_only COLUMN on a table that does exist is drift, and
+     * that is the case that must never quietly answer "not required".
+     */
+    if (/no such table: (org_sso_domains|org_sso_providers|organizations|organization_members)/i.test(e.message)) return null;
+    console.error('[sso] could not determine SSO-only status, refusing password login:', e.message);
     throw e;
   }
 }
 
+/**
+ * Must THIS USER use single sign-on?
+ *
+ * ⚠️ Membership, not just the address. ssoOnlyForEmail() answers about a DOMAIN, and a review used
+ * that gap to walk straight in: any account in the tenant whose address sits outside the verified
+ * domains kept password login — a contractor, an MSP, the one address nobody remembered. Worse, it
+ * could be manufactured on demand, because an org admin can create a local password account at any
+ * address and bind it to their workspace. Enforcing on the domain alone protects the domain; it
+ * does not protect the ORGANIZATION, which is what the setting claims to do.
+ *
+ * So both are asked: the address's domain (which catches people who are not members yet) and every
+ * organization the user actually belongs to.
+ */
+function ssoOnlyForUser(user) {
+  if (!user) return null;
+  const byDomain = ssoOnlyForEmail(user.email);
+  if (byDomain) return byDomain;
+
+  const conn = db();
+  if (!conn) return null;
+  try {
+    return conn.prepare(`
+      SELECT o.id AS organization_id, o.name AS organization_name
+        FROM organization_members m
+        JOIN organizations o ON o.id = m.organization_id
+       WHERE m.user_id = ? AND o.sso_only = 1
+       LIMIT 1
+    `).get(user.id) || null;
+  } catch (e) {
+    if (/no such table: (organization_members|organizations)/i.test(e.message)) return null;
+    throw e;   // drift on a table that exists — fail closed; the caller refuses the login
+  }
+}
+
 module.exports = {
-  list, get, publicList, getOrgProvider, ownerOf, forEmail, ssoOnlyForEmail, DEFAULT_SCOPES, SLUG_RE,
+  list, get, publicList, getOrgProvider, ownerOf, forEmail,
+  ssoOnlyForEmail, ssoOnlyForUser, DEFAULT_SCOPES, SLUG_RE,
 };

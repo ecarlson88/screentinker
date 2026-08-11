@@ -316,6 +316,36 @@ function notifyOperatorOfRemovalRequest(req, { id, orgId, orgName, reason }) {
   }
 }
 
+/*
+ * An SSO-only organization may not dismantle its own enforcement sideways.
+ *
+ * `sso_only` is honoured only while a provider is enabled AND a domain is verified, so disabling
+ * the provider, clearing its domains, or deleting it all switch enforcement off — with `sso_only`
+ * still reading `true`, no request filed and the operator never told. A review used each of the
+ * three, and the delete variant additionally rewrites every federated account to `local`, after
+ * which a password reset takes over accounts the identity provider was supposed to own.
+ *
+ * That made the approval workflow decorative: anyone who could file a request could instead just
+ * turn the provider off. So the same interlock guards every route that would leave the tenant with
+ * nothing enforcing, and points at the request as the way through.
+ */
+function assertNotLastEnforcingProvider(orgId, providerId, what) {
+  const org = db.prepare('SELECT sso_only FROM organizations WHERE id = ?').get(orgId);
+  if (!org || !org.sso_only) return;
+  const remaining = db.prepare(`
+    SELECT COUNT(*) AS n FROM org_sso_domains d
+      JOIN org_sso_providers p ON p.id = d.provider_id
+     WHERE d.organization_id = ? AND d.verified_at IS NOT NULL AND p.enabled = 1
+       AND p.id != ?
+  `).get(orgId, providerId).n;
+  if (remaining > 0) return;   // another provider still enforces; this one may go
+  const e = new Error(`Your organization requires single sign-on, so ${what} would leave nobody able to sign in. `
+    + 'Ask the people who run this server to approve stopping the requirement first.');
+  e.status = 409;
+  e.code = 'sso_only_locked';
+  throw e;
+}
+
 /** A provider's domains, with the DNS record each unverified one still needs. */
 function domainsFor(providerId) {
   return db.prepare('SELECT * FROM org_sso_domains WHERE provider_id = ? ORDER BY domain').all(providerId)
@@ -471,6 +501,15 @@ router.put('/:orgId/sso/:id', requireOrgAdmin, requireVerifiedAdmin, asyncRoute(
    * returns the secret, so a UI that round-trips a form would otherwise blank it on every save —
    * the classic way a settings page silently breaks the thing it is editing.
    */
+  // Disabling this provider, or removing the domains it enforces through, is the same act as
+  // turning the requirement off — and that needs the operator.
+  try {
+    if (enabled !== undefined && !enabled) assertNotLastEnforcingProvider(req.orgId, existing.id, 'disabling this provider');
+    if (domainsSupplied && !cleanDomains) assertNotLastEnforcingProvider(req.orgId, existing.id, 'removing every sign-in domain');
+  } catch (e) {
+    return res.status(e.status || 400).json({ error: e.message, code: e.code });
+  }
+
   let newlyClaimed = [];
   const secretEnc = clientSecret === undefined ? existing.client_secret_enc
     : (clientSecret === '' ? null : secretbox.encrypt(String(clientSecret)));
@@ -785,6 +824,12 @@ router.delete('/:orgId/sso/:id', requireOrgAdmin, requireVerifiedAdmin, (req, re
    * Both are handled here, at the moment the intent is known, rather than inferred later from the
    * absence of configuration — which is what made an unset GOOGLE_CLIENT_ID look like a deletion.
    */
+  try {
+    assertNotLastEnforcingProvider(req.orgId, existing.id, 'deleting this provider');
+  } catch (e) {
+    return res.status(e.status || 400).json({ error: e.message, code: e.code });
+  }
+
   const freed = db.transaction(() => {
     const domains = db.prepare('DELETE FROM org_sso_domains WHERE provider_id = ?').run(existing.id).changes;
     // Back to a local account, so the owner can recover it by proving the mailbox — strictly

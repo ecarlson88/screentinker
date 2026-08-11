@@ -482,7 +482,6 @@ const migrations = [
    * self-service switch gets flipped under pressure. So removal goes through the operator: the
    * request is recorded here and a platform admin has to approve it.
    */
-  "ALTER TABLE organizations ADD COLUMN sso_only INTEGER NOT NULL DEFAULT 0",
   `CREATE TABLE IF NOT EXISTS org_sso_only_requests (
     id                 TEXT PRIMARY KEY,
     organization_id    TEXT NOT NULL,
@@ -958,6 +957,27 @@ migrateGroupSchedules();
 // exist on resource tables - the Phase 1 backfill loop reads team_id and
 // updates workspace_id.
 ensureMultitenancyMigration();
+
+/*
+ * `organizations.sso_only` — added HERE, not in the migrations array above.
+ *
+ * That array runs BEFORE ensureMultitenancyMigration(), which is what creates the organizations
+ * table, so on a fresh install the ALTER hit a table that did not exist yet: `[migrate] FAILED …
+ * no such table: organizations`, one console.error among ~85 migration lines. The instance then
+ * ran its entire first boot with the SSO settings screen 500ing and — far worse —
+ * ssoOnlyForEmail() catching `no such column` and returning "not SSO-only", which is password
+ * login proceeding for an organization that had switched it off. It self-healed on the second
+ * boot, which is exactly what makes it easy to miss.
+ */
+try {
+  const orgCols = db.prepare('PRAGMA table_info(organizations)').all().map((c) => c.name);
+  if (orgCols.length && !orgCols.includes('sso_only')) {
+    db.exec('ALTER TABLE organizations ADD COLUMN sso_only INTEGER NOT NULL DEFAULT 0');
+    console.log('[migrate] added organizations.sso_only');
+  }
+} catch (e) {
+  console.error('[migrate] could not add organizations.sso_only:', e.message);
+}
 
 // Phase 2.2c migration: backfill content_folders.workspace_id from owner's
 // default workspace. The ALTER lives in the migrations array above; this
