@@ -588,7 +588,9 @@ test('the DNS record is per-domain and per-claim, so an old record proves nothin
   const two = domainVerify.instructions('acme.test', b);
   assert.equal(one.record_name, '_screentinker-verify.acme.test');
   assert.notEqual(one.txt_value, two.txt_value, 'reissuing changes what must be published');
-  assert.notEqual(one.cname_value, two.cname_value);
+  // TXT is the only accepted form: a CNAME alternative would need a wildcard zone this project
+  // does not operate, so offering one would document a check that could never pass.
+  assert.equal(one.cname_value, undefined, 'no CNAME form is advertised');
   // The record lives at a dedicated name, never the apex, where it would sit beside SPF and DMARC.
   assert.ok(!domainVerify.instructions('acme.test', a).record_name.startsWith('acme.test'));
 });

@@ -420,16 +420,20 @@ deny a public domain to everyone else.
 A claimed domain **routes nobody and authenticates nobody until DNS proves the organization controls
 it.** Typing a domain into a form reserves the name and nothing more.
 
-Publish either record — whichever the domain's DNS will accept — then press **Verify**:
+Publish this record, then press **Verify**:
 
 ```
-_screentinker-verify.example.com.  IN  TXT    "st-verify=<token>"
-_screentinker-verify.example.com.  IN  CNAME  <token>.verify.screentinker.com.
+_screentinker-verify.example.com.  IN  TXT  "st-verify=<token>"
 ```
 
 The token is unique per domain, so publishing one proof cannot be replayed to claim a second. A
 dedicated `_`-prefixed name is used rather than the apex, where a careless edit would sit alongside
-SPF and DMARC and break mail.
+SPF and DMARC and break mail — and where a wildcard `*.example.com` could not be confused for a
+proof, since a wildcard answers with its own value and never with the token.
+
+TXT is the only accepted form. A CNAME alternative would have to point at a wildcard zone this
+project operates, answering for every token ever issued; documenting one without running it would
+describe a check that can never pass.
 
 **An unverified claim lapses after 8 hours**, and lapsing rotates the token. This is what stops
 squatting: a tenant cannot type a company's domain and hold it against the real owner, and a record

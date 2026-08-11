@@ -743,8 +743,6 @@ export async function render(container) {
               ${d.verified ? '' : `
                 <div style="margin-top:6px;color:var(--text-muted)">${esc(t('sso.dns_instructions'))}</div>
                 <code style="display:block;word-break:break-all;padding:6px;background:var(--bg-secondary);border-radius:4px;margin-top:4px">${esc(d.record_name)}  TXT  ${esc(d.txt_value)}</code>
-                <div style="margin-top:4px;color:var(--text-muted)">${esc(t('sso.dns_or_cname'))}</div>
-                <code style="display:block;word-break:break-all;padding:6px;background:var(--bg-secondary);border-radius:4px;margin-top:4px">${esc(d.record_name)}  CNAME  ${esc(d.cname_value)}</code>
                 ${d.last_error ? `<div style="margin-top:4px;color:var(--danger,#b91c1c)">${esc(d.last_error)}</div>` : ''}`}
               <div id="ssoVerify-${esc(p.id)}-${esc(d.domain.replace(/[^a-z0-9]/g, '-'))}" style="margin-top:4px"></div>
             </div>`).join('')}

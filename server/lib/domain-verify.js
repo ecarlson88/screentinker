@@ -13,15 +13,19 @@
  * sense that matters here. It is also the mechanism every other vendor uses, so the instructions
  * are already familiar to the person who has to follow them.
  *
- * TWO RECORD FORMS, both at the same name, because organizations differ in what their DNS lets
- * them add — some providers refuse TXT at a subdomain, some refuse CNAME anywhere useful:
+ * ONE RECORD FORM — a TXT record at a dedicated name:
  *
- *   _screentinker-verify.example.com.  IN  TXT    "st-verify=<token>"
- *   _screentinker-verify.example.com.  IN  CNAME  <token>.verify.screentinker.com.
+ *   _screentinker-verify.example.com.  IN  TXT  "st-verify=<token>"
+ *
+ * A CNAME alternative was drafted and dropped. It would have pointed at
+ * `<token>.verify.screentinker.com`, which requires operating a wildcard DNS zone that answers for
+ * every token ever issued — infrastructure this project does not have, so the instructions would
+ * have described a check that could never pass. TXT needs nothing but the customer's own zone.
  *
  * A dedicated `_`-prefixed name is used rather than the apex on purpose: an apex TXT record sits
  * alongside SPF and DMARC, where a careless edit breaks mail, and it is the one record set an
- * administrator is most reluctant to touch.
+ * administrator is most reluctant to touch. It also means a wildcard `*.example.com` cannot be
+ * mistaken for a proof — a wildcard answers with ITS value, never with our token.
  */
 
 const dns = require('dns').promises;
@@ -29,7 +33,6 @@ const crypto = require('crypto');
 
 const RECORD_PREFIX = '_screentinker-verify';
 const TXT_PREFIX = 'st-verify=';
-const CNAME_SUFFIX = '.verify.screentinker.com';
 
 // A DNS answer that never arrives must not hold an HTTP request open. The resolver's own retries
 // sit under this, so it is a ceiling on the whole lookup rather than on one query.
@@ -68,7 +71,6 @@ function instructions(domain, token) {
   return {
     record_name: recordName(domain),
     txt_value: `${TXT_PREFIX}${token}`,
-    cname_value: `${token}${CNAME_SUFFIX}`,
   };
 }
 
@@ -94,45 +96,33 @@ function withTimeout(promise, ms) {
 async function check(domain, token) {
   const name = recordName(domain);
   const wantTxt = `${TXT_PREFIX}${token}`;
-  const wantCname = `${token}${CNAME_SUFFIX}`;
 
-  const results = await Promise.allSettled([
-    withTimeout(dns.resolveTxt(name), LOOKUP_TIMEOUT_MS),
-    withTimeout(dns.resolveCname(name), LOOKUP_TIMEOUT_MS),
-  ]);
-
-  const [txtRes, cnameRes] = results;
-
-  if (txtRes.status === 'fulfilled') {
-    // resolveTxt returns arrays of string chunks — a long value is split, so join before comparing.
-    for (const chunks of txtRes.value) {
-      if (chunks.join('').trim() === wantTxt) return { ok: true, via: 'TXT' };
-    }
-  }
-  if (cnameRes.status === 'fulfilled') {
-    for (const target of cnameRes.value) {
-      // DNS names are case-insensitive and may or may not carry the root dot.
-      if (target.replace(/\.$/, '').toLowerCase() === wantCname.toLowerCase()) return { ok: true, via: 'CNAME' };
-    }
+  let records;
+  try {
+    records = await withTimeout(dns.resolveTxt(name), LOOKUP_TIMEOUT_MS);
+  } catch (e) {
+    // NXDOMAIN and "no such record" are the ORDINARY answers here — an admin checking before the
+    // record has propagated — so they are "not found yet", not an error to be alarmed by.
+    if (/timed out/i.test(e.message)) return { ok: false, error: 'the DNS lookup timed out — try again shortly' };
+    return { ok: false, error: `no ${RECORD_PREFIX} record found for ${domain} yet (DNS can take a few minutes)` };
   }
 
-  // Nothing matched. Say which of the two failure shapes it is, because the fixes differ: a record
-  // that is absent needs publishing, a record that is present but wrong needs correcting.
-  const found = [];
-  if (txtRes.status === 'fulfilled') found.push(...txtRes.value.map((c) => `TXT ${c.join('')}`));
-  if (cnameRes.status === 'fulfilled') found.push(...cnameRes.value.map((c) => `CNAME ${c}`));
-
-  if (found.length) {
-    return { ok: false, error: `${name} exists but does not match. Found: ${found.join('; ')}` };
+  // resolveTxt returns arrays of string chunks — a value over 255 bytes is split, so join first.
+  for (const chunks of records) {
+    if (chunks.join('').trim() === wantTxt) return { ok: true, via: 'TXT' };
   }
 
-  const timedOut = results.some((r) => r.status === 'rejected' && /timed out/i.test(r.reason && r.reason.message));
-  if (timedOut) return { ok: false, error: 'the DNS lookup timed out — try again shortly' };
-
+  // Present but wrong is a different problem from absent, and the fixes differ: one needs
+  // correcting, the other needs publishing. A wildcard record lands here too, which is right —
+  // it answers with its own value, and that is not a proof of anything.
+  if (records.length) {
+    const found = records.map((c) => c.join('')).join('; ');
+    return { ok: false, error: `${name} exists but does not match. Found: ${found}` };
+  }
   return { ok: false, error: `no ${RECORD_PREFIX} record found for ${domain} yet (DNS can take a few minutes)` };
 }
 
 module.exports = {
   check, instructions, newToken, recordName, isClaimExpired,
-  CLAIM_TTL_S, RECORD_PREFIX, TXT_PREFIX, CNAME_SUFFIX,
+  CLAIM_TTL_S, RECORD_PREFIX, TXT_PREFIX,
 };
