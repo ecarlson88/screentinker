@@ -18,6 +18,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const fs = require('node:fs');
 const jwt = require('jsonwebtoken');
 
 const oidc = require('../lib/oidc');
@@ -377,16 +378,23 @@ test('an instance provider wins a slug clash with an org one', () => {
   });
 });
 
-test('a domain can only be held by one organization AT THE DATABASE', () => {
-  // Uniqueness used to be enforced only by a check in the route, which a race defeated twice in
-  // review. It is now a UNIQUE constraint, so a second claim cannot exist even if the check is
-  // bypassed entirely — the strongest form of "first claim wins" available here.
-  assert.throws(() => {
-    withOrgDb([
-      { id: '1', org: 'org-a', slug: 'orgaaa', name: 'First', domains: 'shared.com' },
-      { id: '2', org: 'org-b', slug: 'orgbbb', name: 'Second', domains: 'shared.com' },
-    ], () => {});
-  }, /UNIQUE/);
+test('THE SHIPPED SCHEMA makes one domain, one organization a constraint', () => {
+  /*
+   * Uniqueness was enforced only by a check in the route, which a race defeated twice in review.
+   * It is now a UNIQUE constraint, so a second claim cannot exist even if the check is bypassed.
+   *
+   * ⚠️ Read from server/db/database.js, NOT from the test harness. The earlier version of this
+   * test asserted against the harness's own CREATE TABLE and therefore stayed green when UNIQUE was
+   * removed from the shipped schema — it tested a copy of the thing it was named after.
+   */
+  const schema = fs.readFileSync(require.resolve('../db/database.js'), 'utf8');
+  const table = schema.slice(schema.indexOf('CREATE TABLE IF NOT EXISTS org_sso_domains'));
+  const body = table.slice(0, table.indexOf('`,'));
+  assert.match(body, /domain\s+TEXT\s+NOT NULL\s+UNIQUE/, 'org_sso_domains.domain must be UNIQUE');
+  // And the row must not outlive its provider: a verified row never expires, so an orphan would
+  // block its domain for every organization, forever, while being invisible in the API.
+  assert.match(body, /FOREIGN KEY \(provider_id\) REFERENCES org_sso_providers\(id\) ON DELETE CASCADE/,
+    'a domain row must be removed with its provider');
 });
 
 test('no database means no org providers, and no crash', () => {
@@ -425,19 +433,26 @@ test('an INSTANCE provider carries no organization, so it is not domain-confined
   assert.equal(g.source, 'env');
 });
 
-test('domain routing follows who VERIFIED first, not table-scan order', () => {
+test('a domain routes to exactly the provider that verified it', () => {
   /*
-   * forEmail used an unordered SELECT, so deleting and re-adding a provider silently flipped which
-   * IdP an entire domain routed to. The earlier version of this test asserted only that two calls
-   * agreed with each other, which an unordered scan satisfies within one process — it passed with
-   * the ordering removed and was therefore worth nothing. Assert the WINNER.
+   * forEmail used an unordered SELECT over a comma column, so deleting and re-adding a provider
+   * silently flipped which IdP a whole domain routed to.
+   *
+   * Two earlier versions of this test were hollow: one asserted only that two calls agreed with
+   * each other (an unordered scan satisfies that within a process), the next used two DIFFERENT
+   * domains so no ordering was exercised at all. The property that actually matters is that a
+   * domain reaches its OWN provider and never a sibling's, so assert that.
    */
   withOrgDb([
-    { id: 'b', org: 'org-a', slug: 'orgbbb', name: 'Later', domains: 'later.test', verifiedAt: 9000 },
-    { id: 'a', org: 'org-a', slug: 'orgaaa', name: 'Earlier', domains: 'earlier.test', verifiedAt: 1000 },
+    { id: 'a', org: 'org-a', slug: 'orgaaa', name: 'Alpha', domains: 'alpha.test' },
+    { id: 'b', org: 'org-b', slug: 'orgbbb', name: 'Beta', domains: 'beta.test', pending: 'gamma.test' },
   ], (m) => {
-    assert.equal(m.forEmail('x@earlier.test').name, 'Earlier');
-    assert.equal(m.forEmail('x@later.test').name, 'Later');
+    assert.equal(m.forEmail('x@alpha.test').name, 'Alpha');
+    assert.equal(m.forEmail('x@beta.test').name, 'Beta');
+    assert.equal(m.forEmail('x@gamma.test'), null, 'unverified, so it belongs to nobody');
+    // Beta must not inherit Alpha's domain through a join or an ordering accident.
+    assert.equal(m.getOrgProvider('orgbbb').emailDomains, 'beta.test');
+    assert.equal(m.getOrgProvider('orgaaa').emailDomains, 'alpha.test');
   });
 });
 
@@ -602,4 +617,104 @@ test('a lapsed claim frees the domain for someone else', () => {
   const owner = { domain: 'victim-corp.test', token_issued_at: NOW - 60, verified_at: NOW };
   assert.equal(domainVerify.isClaimExpired(squatter, NOW), true, 'the squatter no longer blocks it');
   assert.equal(domainVerify.isClaimExpired(owner, NOW), false, 'the real owner, having proved it, does');
+});
+
+/*
+ * The proof name must not be delegated.
+ *
+ * A TXT lookup follows CNAMEs transparently, and RFC 4592 means a wildcard `*.victim.com`
+ * synthesizes `_screentinker-verify.victim.com` as well. So a wildcard CNAME pointing at anything
+ * the attacker controls lets them publish the token in THEIR zone and prove a domain they do not
+ * own — turning an ordinary subdomain takeover into the whole company's sign-in. A review did
+ * exactly this against a real authoritative zone.
+ *
+ * The resolver is stubbed rather than mocked at the network layer: `dns.promises` is a singleton,
+ * so replacing the two methods is enough and the real check() runs unmodified.
+ */
+const dnsPromises = require('node:dns').promises;
+
+function withStubbedDns({ cname, txt }, fn) {
+  const realCname = dnsPromises.resolveCname;
+  const realTxt = dnsPromises.resolveTxt;
+  const nx = () => { const e = new Error('queryTxt ENOTFOUND'); e.code = 'ENOTFOUND'; throw e; };
+  dnsPromises.resolveCname = async () => (cname ? cname : nx());
+  dnsPromises.resolveTxt = async () => (txt ? txt : nx());
+  return Promise.resolve(fn()).finally(() => {
+    dnsPromises.resolveCname = realCname;
+    dnsPromises.resolveTxt = realTxt;
+  });
+}
+
+test('DELEGATION: a CNAME at the proof name is refused, even when the TXT matches', async () => {
+  const token = 'deadbeefdeadbeefdeadbeefdeadbeef';
+  // The attacker owns takeover.attacker.test and publishes a perfect token there; victim.test has
+  // a wildcard CNAME pointing at it. Without the refusal this returns ok:true.
+  const r = await withStubbedDns(
+    { cname: ['takeover.attacker.test'], txt: [[`st-verify=${token}`]] },
+    () => domainVerify.check('victim.test', token),
+  );
+  assert.equal(r.ok, false, 'a delegated proof name must never verify');
+  assert.match(r.error, /CNAME/, 'and the admin is told exactly why');
+});
+
+test('an ordinary TXT proof in the domain\'s own zone still verifies', async () => {
+  const token = 'cafebabecafebabecafebabecafebabe';
+  const r = await withStubbedDns({ cname: null, txt: [[`st-verify=${token}`]] },
+    () => domainVerify.check('acme.test', token));
+  assert.equal(r.ok, true);
+  assert.equal(r.via, 'TXT');
+});
+
+test('a wildcard TXT answers with its own value, which is not a proof', async () => {
+  const r = await withStubbedDns({ cname: null, txt: [['v=spf1 -all']] },
+    () => domainVerify.check('victim.test', 'sometoken'));
+  assert.equal(r.ok, false);
+  assert.match(r.error, /does not match/);
+});
+
+test('a 255-byte-split TXT record is joined before comparing', async () => {
+  // resolveTxt returns one array of chunks per record; a long value arrives split.
+  const token = 'a'.repeat(32);
+  const full = `st-verify=${token}`;
+  const r = await withStubbedDns({ cname: null, txt: [[full.slice(0, 5), full.slice(5)]] },
+    () => domainVerify.check('acme.test', token));
+  assert.equal(r.ok, true, 'chunks of ONE record are concatenated');
+});
+
+test('chunks are never joined ACROSS records', async () => {
+  const token = 'b'.repeat(32);
+  const full = `st-verify=${token}`;
+  const r = await withStubbedDns({ cname: null, txt: [[full.slice(0, 5)], [full.slice(5)]] },
+    () => domainVerify.check('acme.test', token));
+  assert.equal(r.ok, false, 'two unrelated records must not add up to a proof');
+});
+
+test('SSRF: a trailing root dot is the same host, and does not slip the guard', () => {
+  // `https://localhost./` is a legal fully-qualified spelling that WHATWG URL preserves, so it
+  // matched neither `localhost` nor `*.localhost` and was allowed. The literal-IP forms were never
+  // affected — the parser normalises those itself.
+  for (const u of ['https://localhost./', 'https://LOCALHOST./', 'https://foo.localhost./']) {
+    assert.throws(() => oidc.assertFetchable(u), /not publicly routable/, u);
+  }
+  // and a real host that merely ends in a dot is still fine
+  for (const u of ['https://accounts.google.com./', 'https://fcm.googleapis.com./']) {
+    assert.doesNotThrow(() => oidc.assertFetchable(u), u);
+  }
+});
+
+test('a user object never leaves the server carrying a reset or verify hash', () => {
+  /*
+   * Two call sites each stripped three columns and stopped, so every login response also carried
+   * `password_reset_hash` and `email_verify_hash` — live credentials for taking the account over.
+   * The sanitiser is one function now; this pins the list so the next column added to `users` has
+   * to be considered rather than shipped.
+   */
+  const src = fs.readFileSync(require.resolve('../routes/auth.js'), 'utf8');
+  const block = src.slice(src.indexOf('const PRIVATE_USER_FIELDS'), src.indexOf('function publicUser'));
+  for (const field of ['password_hash', 'totp_secret_enc', 'totp_last_step',
+    'password_reset_hash', 'password_reset_expires', 'email_verify_hash', 'email_verify_expires']) {
+    assert.ok(block.includes(`'${field}'`), `${field} must never be serialised to a client`);
+  }
+  // And nothing may hand-roll the old partial strip again.
+  assert.ok(!/totp_last_step,\s*\.\.\.safeUser/.test(src), 'use publicUser(), not an inline destructure');
 });

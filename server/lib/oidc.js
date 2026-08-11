@@ -115,7 +115,13 @@ function assertFetchable(url) {
   try { u = new URL(url); } catch { throw new Error(`not a URL: ${url}`); }
   if (u.protocol !== 'https:') throw new Error('provider URLs must use https');
 
-  const host = u.hostname;
+  /*
+   * A trailing root dot is a legal, fully-qualified spelling of the same name, and WHATWG URL keeps
+   * it — so `https://localhost./` matched neither alternative below and was ALLOWED. The parser
+   * normalises the literal-IP forms itself (`127.0.0.1.` becomes `127.0.0.1`), so only the name
+   * form slipped, and on a resolver that synthesizes `localhost.` it resolves to loopback.
+   */
+  const host = u.hostname.replace(/\.$/, '');
   // URL keeps IPv6 literals in brackets; net.isIP does not want them.
   const bare = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
   const family = net.isIP(bare);

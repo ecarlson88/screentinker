@@ -276,17 +276,17 @@ function forEmail(email) {
   if (!domain) return null;
   try {
     /*
-     * Routing is driven by the VERIFIED domain table, not by the text an admin typed, and the join
-     * is what enforces it — an unverified claim cannot send anyone anywhere. Ordering by the
-     * verification time makes the winner of any residual tie the one who PROVED it first, rather
-     * than whichever row a table scan reached.
+     * Routing is driven by the VERIFIED domain table, not by the text an admin typed, and the JOIN
+     * is what enforces it — an unverified claim cannot send anyone anywhere.
+     *
+     * No ORDER BY: `domain` is UNIQUE, so at most one row can match and there is no tie to break.
+     * An earlier version ordered here and the comment claimed it decided a race; it decided
+     * nothing, and saying so invited someone to rely on it.
      */
     const row = conn.prepare(`
       SELECT p.* FROM org_sso_domains d
       JOIN org_sso_providers p ON p.id = d.provider_id
       WHERE d.domain = ? AND d.verified_at IS NOT NULL AND p.enabled = 1
-      ORDER BY d.verified_at, d.id
-      LIMIT 1
     `).get(domain);
     if (row) return rowToProvider(row, require('./secretbox'));
   } catch (e) {

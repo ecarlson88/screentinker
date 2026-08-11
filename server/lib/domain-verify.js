@@ -24,8 +24,14 @@
  *
  * A dedicated `_`-prefixed name is used rather than the apex on purpose: an apex TXT record sits
  * alongside SPF and DMARC, where a careless edit breaks mail, and it is the one record set an
- * administrator is most reluctant to touch. It also means a wildcard `*.example.com` cannot be
- * mistaken for a proof — a wildcard answers with ITS value, never with our token.
+ * administrator is most reluctant to touch.
+ *
+ * ⚠️ THE PROOF NAME MUST NOT BE A CNAME. A TXT lookup follows CNAMEs transparently, and RFC 4592
+ * means a wildcard `*.example.com` synthesizes `_screentinker-verify.example.com` too — so a
+ * wildcard CNAME pointing anywhere the attacker controls would let them prove a domain they do not
+ * own. That turns an ordinary subdomain takeover into an apex takeover, and from there into every
+ * `@example.com` login. ACME's dns-01 permits this delegation deliberately; here the thing being
+ * delegated is the whole company's sign-in, so it is refused instead.
  */
 
 const dns = require('dns').promises;
@@ -57,7 +63,11 @@ const CLAIM_TTL_S = 8 * 60 * 60;
 
 /** True when an unverified claim has run out of time and no longer reserves anything. */
 function isClaimExpired(row, nowS = Math.floor(Date.now() / 1000)) {
-  if (!row || row.verified_at) return false;
+  if (!row) return false;
+  // `verified_at` is compared to null, NOT tested for truthiness: SQL asks `IS NOT NULL` and a
+  // stored 0 would otherwise be "verified" to the router and "unverified" here — two definitions of
+  // the same word, which is how a domain ends up routing while the code believes it cannot.
+  if (row.verified_at !== null && row.verified_at !== undefined) return false;
   return (Number(row.token_issued_at) || 0) + CLAIM_TTL_S <= nowS;
 }
 
@@ -97,6 +107,22 @@ async function check(domain, token) {
   const name = recordName(domain);
   const wantTxt = `${TXT_PREFIX}${token}`;
 
+  /*
+   * Refuse before looking at the TXT at all if the name is delegated. Checking afterwards would
+   * still be safe, but doing it first means the answer never depends on what the delegation target
+   * happens to say.
+   */
+  try {
+    const cnames = await withTimeout(dns.resolveCname(name), LOOKUP_TIMEOUT_MS);
+    if (cnames && cnames.length) {
+      return {
+        ok: false,
+        error: `${name} is a CNAME (to ${cnames[0]}). The record must be a TXT record in this `
+          + 'domain\u2019s own zone — a delegated name would let whoever controls the target prove this domain.',
+      };
+    }
+  } catch { /* no CNAME is the normal and wanted case */ }
+
   let records;
   try {
     records = await withTimeout(dns.resolveTxt(name), LOOKUP_TIMEOUT_MS);
@@ -113,8 +139,8 @@ async function check(domain, token) {
   }
 
   // Present but wrong is a different problem from absent, and the fixes differ: one needs
-  // correcting, the other needs publishing. A wildcard record lands here too, which is right —
-  // it answers with its own value, and that is not a proof of anything.
+  // correcting, the other needs publishing. A wildcard TXT lands here, which is right — it answers
+  // with its own value, and that is not a proof of anything. (A wildcard CNAME is refused above.)
   if (records.length) {
     const found = records.map((c) => c.join('')).join('; ');
     return { ok: false, error: `${name} exists but does not match. Found: ${found}` };

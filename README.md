@@ -435,6 +435,21 @@ TXT is the only accepted form. A CNAME alternative would have to point at a wild
 project operates, answering for every token ever issued; documenting one without running it would
 describe a check that can never pass.
 
+⚠️ **The proof name itself must not be a CNAME.** A TXT lookup follows CNAMEs, and a wildcard
+`*.example.com` covers `_screentinker-verify.example.com` too — so a wildcard CNAME would let
+whoever controls its target prove the domain, turning an ordinary subdomain takeover into control of
+every `@example.com` login. A delegated proof name is refused, which is stricter than ACME's dns-01.
+
+**An unverified claim lapses, and lapsing RELEASES it.** Pressing Verify on an expired claim does
+not reissue it in place — that renewed the clock, so one request per window held a domain forever.
+The claim is released, the domain is free for anyone else, and re-adding it is a new claim: new
+token, and the operator is notified again. Squatting is not impossible; it is loud.
+
+**Deleting a provider releases its domains and returns its accounts to local sign-in**, so the
+organization can re-claim its own domain and its people can recover by password reset. Both used to
+be stranded: a verified domain row outlived its provider and blocked that domain for everyone
+permanently, and its users could neither sign in nor reset.
+
 **An unverified claim lapses after 8 hours**, and lapsing rotates the token. This is what stops
 squatting: a tenant cannot type a company's domain and hold it against the real owner, and a record
 left in DNS from an abandoned attempt cannot satisfy a later claim. A verified domain never expires —

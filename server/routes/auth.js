@@ -229,7 +229,7 @@ function issueSession(req, res, user, extra = {}) {
   // #100: callers pass a SELECT * row. Strip password_hash AND the TOTP internals
   // (the encrypted secret + the replay counter) so no secret/internal rides in the
   // response body - "secrets never in responses", same as the API token work.
-  const { password_hash, totp_secret_enc, totp_last_step, ...safeUser } = user;
+  const safeUser = publicUser(user);
   res.json({ token, user: safeUser, current_workspace_id: workspaceId, ...extra });
 }
 
@@ -340,6 +340,23 @@ function emailAllowedForProvider(provider, email) {
 
 function isOrphanedFederated(user) {
   if (!user || user.auth_provider === 'local') return false;
+  /*
+   * ⚠️ ONLY an organization provider's slug, never an instance one.
+   *
+   * This used to ask "does anything answer to that slug?", which cannot tell DELETED apart from
+   * NOT CURRENTLY CONFIGURED. Unsetting GOOGLE_CLIENT_ID — or fat-fingering MICROSOFT_TENANT_ID to
+   * `common`, a typo the provider code already refuses — therefore made every account on that
+   * provider password-resettable instance-wide, and irreversibly: the reset rewrites auth_provider
+   * to 'local', so restoring the variable does not restore the binding. An organization that chose
+   * SSO to enforce its IdP's MFA would have had that silently downgraded to mailbox access.
+   *
+   * Org slugs are generated as `org` + 12 hex (see org-sso.js), so the shape is decisive: an env
+   * provider can never match it, and an unconfigured env provider is UNAVAILABLE, not deleted.
+   *
+   * Deleting an org provider now returns its users to local accounts outright (org-sso.js), so this
+   * only catches rows stranded some other way — an interrupted delete, a restored backup.
+   */
+  if (!/^org[0-9a-f]{12}$/.test(String(user.auth_provider))) return false;
   return !oidcProviders.ownerOf(user.auth_provider);
 }
 
@@ -923,6 +940,29 @@ const OIDC_TX_COOKIE = 'st_oidc_tx';
 const SSO_CLAIM_COOKIE = 'st_sso_claim';
 const OIDC_TX_TTL_S = 600;
 
+/*
+ * The only shape of a user row that may leave the server.
+ *
+ * Two call sites each stripped `password_hash, totp_secret_enc, totp_last_step` and stopped there,
+ * so every login response also carried `password_reset_hash` and `email_verify_hash` — live
+ * credentials for taking the account over, handed to the browser. They are hashes of random tokens
+ * and only ever went to the account's own page, so this is hygiene rather than a takeover, but it
+ * means a logged-in XSS reads a working reset hash. Denylisted in ONE place so the next field
+ * nobody thinks about has somewhere obvious to go.
+ */
+const PRIVATE_USER_FIELDS = [
+  'password_hash', 'totp_secret_enc', 'totp_last_step',
+  'password_reset_hash', 'password_reset_expires',
+  'email_verify_hash', 'email_verify_expires',
+];
+
+function publicUser(row) {
+  if (!row) return row;
+  const out = { ...row };
+  for (const f of PRIVATE_USER_FIELDS) delete out[f];
+  return out;
+}
+
 function readCookie(req, name) {
   const raw = req.headers.cookie;
   if (!raw) return null;
@@ -955,10 +995,16 @@ function readCookie(req, name) {
 function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch((err) => {
     console.error(`[auth] unhandled error in ${req.method} ${req.path}:`, err && err.message);
-    if (res.headersSent) return;
-    // These two routes are browser redirects, not API calls; a JSON body would be shown as text.
-    if (req.path.startsWith('/oidc/')) return backToApp(res, { sso_error: 'server_error' });
-    res.status(500).json({ error: 'Something went wrong' });
+    // Wrapped: if responding THROWS, the rejection has no handler and kills the process — the
+    // guard against process death causing process death.
+    try {
+      if (res.headersSent) return;
+      // These are browser redirects, not API calls; a JSON body would be shown as text.
+      if (req.path.startsWith('/oidc/')) return backToApp(res, { sso_error: 'server_error' });
+      res.status(500).json({ error: 'Something went wrong' });
+    } catch (e2) {
+      console.error('[auth] failed to report an error:', e2 && e2.message);
+    }
   });
 }
 
@@ -1263,10 +1309,19 @@ router.post('/sso/claim', (req, res) => {
   } catch {
     return res.status(401).json({ error: 'That sign-in has expired' });
   }
+  /*
+   * The wrapped token must be an ordinary SESSION token. Forging the wrapper needs the signing
+   * secret, so this is not exploitable — but a `mfa_pending` token nested inside a valid wrapper
+   * was accepted, which is the same interchangeability the outer typ check was added to close.
+   * A session token carries no `aud` and no `mfa_pending`; anything else is a different kind.
+   */
+  if (session.mfa_pending || session.aud || !session.id) {
+    return res.status(401).json({ error: 'That sign-in has expired' });
+  }
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(session.id);
   if (!user) return res.status(401).json({ error: 'That sign-in has expired' });
 
-  const { password_hash, totp_secret_enc, totp_last_step, ...safeUser } = user;
+  const safeUser = publicUser(user);
   res.json({ token: claims.tok, user: safeUser, current_workspace_id: claims.wsp || null });
 });
 

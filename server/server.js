@@ -610,7 +610,12 @@ app.use('/api/auth/users', rateLimit(60000, 20));
 app.use('/api/auth', require('./routes/auth'));
 // Per-organization SSO configuration. Mounted under /api/organizations so the org id is the
 // route's own subject, which is what the org_owner/org_admin check keys on.
-app.use('/api/organizations', require('./routes/org-sso'));
+/*
+ * Rate-limited because these routes do outbound work on caller-supplied input: OIDC discovery on a
+ * customer-chosen issuer, and a live DNS lookup per domain verification. Everything under
+ * /api/auth/* already had a limit; this router was mounted without one.
+ */
+app.use('/api/organizations', rateLimit(60000, 60), require('./routes/org-sso'));
 // Rate limit pairing to prevent brute force (5 attempts per minute per IP).
 // #88: bind this to the whole /api/provision surface, not just /pair - the bare
 // POST /api/provision (routes/provisioning.js) is a second pairing endpoint that

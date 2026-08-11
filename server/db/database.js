@@ -410,9 +410,10 @@ const migrations = [
    * `client_secret_enc` is AES-256-GCM via lib/secretbox, the same at-rest treatment as TOTP
    * secrets and BYOK AI keys. PKCE means a secret is optional, so a public client stores NULL.
    *
-   * `email_domains` drives routing: a user typing name@customer.com is sent to that customer's
-   * provider instead of being shown a password box. It is a plain comma list because it is small,
-   * edited as a unit, and never joined against.
+   * `email_domains` is the list an admin TYPED, kept for display and for the edit form. It does not
+   * drive routing — org_sso_domains does, and only its verified rows (see the table below). The two
+   * are not interchangeable: reading this column to decide who may sign in would let a tenant route
+   * a domain it never proved.
    */
   `CREATE TABLE IF NOT EXISTS org_sso_providers (
     id                 TEXT PRIMARY KEY,
@@ -460,7 +461,12 @@ const migrations = [
     last_checked_at    INTEGER,
     last_error         TEXT,
     created_at         INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
+    -- A verified row never expires and domain is globally UNIQUE, so a row that outlives its
+    -- provider blocks that domain for EVERYONE, forever, while being invisible in the API. The
+    -- delete handler clears these explicitly; this is the backstop for every other route out
+    -- (an organization cascade, a manual delete, a future caller that forgets).
+    FOREIGN KEY (provider_id) REFERENCES org_sso_providers(id) ON DELETE CASCADE
   )`,
   "CREATE INDEX IF NOT EXISTS idx_org_sso_domains_org ON org_sso_domains(organization_id)",
   "CREATE INDEX IF NOT EXISTS idx_org_sso_domains_provider ON org_sso_domains(provider_id)",
@@ -632,6 +638,40 @@ for (const sql of migrations) {
   }
 }
 if (_migApplied > 0) console.log(`[migrate] applied ${_migApplied} new column migration(s)`);
+
+/*
+ * Say something when per-org SSO domains predate the proof requirement.
+ *
+ * Domains used to be a comma list an admin typed, and that list routed logins. They now route only
+ * once DNS proves them, so on an instance upgraded from an earlier build of this feature every one
+ * of those domains silently stops working — the provider still says "enabled", the typed list is
+ * still on screen, and every federated user in that organization is locked out with no self-service
+ * way back.
+ *
+ * They are deliberately NOT auto-claimed. A claim now notifies the operator, reserves the name
+ * against other tenants and starts an 8-hour clock; manufacturing all of that on an admin's behalf,
+ * for domains nobody ever proved, is not a migration's decision to make. So: name them, loudly,
+ * once per boot, and let an admin re-add the ones they still want.
+ */
+try {
+  const stranded = db.prepare(`
+    SELECT p.slug, p.name, p.organization_id, p.email_domains
+      FROM org_sso_providers p
+     WHERE p.email_domains != ''
+       AND NOT EXISTS (SELECT 1 FROM org_sso_domains d WHERE d.provider_id = p.id)
+  `).all();
+  if (stranded.length) {
+    console.warn(`[migrate] ⚠️  ${stranded.length} SSO provider(s) have typed domains that were never verified.`);
+    console.warn('[migrate]    Domains now route only after a DNS TXT record proves them, so these route NOBODY:');
+    for (const r of stranded) {
+      console.warn(`[migrate]      ${r.name} (${r.slug}, org ${r.organization_id}): ${r.email_domains}`);
+    }
+    console.warn('[migrate]    Re-add each domain in Settings to get its record, then Verify. See README, "Proving a domain".');
+  }
+} catch (e) {
+  // The table may not exist yet on a first boot; that is not a problem worth a stack trace.
+  if (!/no such table/i.test(e.message)) console.error('[migrate] SSO domain check failed:', e.message);
+}
 
 // #74/#75 per-item schedules: the playlist_item_schedules table is created
 // idempotently by schema.sql (CREATE TABLE IF NOT EXISTS, run every boot, so it

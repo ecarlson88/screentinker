@@ -101,9 +101,22 @@ function toPublic(row) {
  * hand side of an address. A wildcard is refused — "*" would route every unrecognised address at
  * one customer's IdP.
  */
+const MAX_DOMAINS = 50;
+
 function normaliseDomains(raw) {
   const seen = new Set();
   for (const part of String(raw || '').split(/[,\s]+/)) {
+    /*
+     * Capped. Uncapped, one verified org admin could POST 20,000 domains inside the 12 MB body
+     * limit: 20,000 rows inserted under a single write lock (stalling every other query on the
+     * instance) and 20,000 notification emails per platform admin. No real organization signs in
+     * from fifty domains, and an org that does can create a second provider.
+     */
+    if (seen.size >= MAX_DOMAINS) {
+      const e = new Error(`at most ${MAX_DOMAINS} sign-in domains per provider`);
+      e.status = 400;
+      throw e;
+    }
     let d = part.trim().toLowerCase().replace(/^@/, '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
     if (!d) continue;
     if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(d)) {
@@ -178,19 +191,22 @@ function syncDomains(providerId, orgId, domains) {
 
   for (const d of wanted) {
     const mine = stale.get(d);
-    if (mine) {
-      stale.delete(d);
-      /*
-       * Already ours — keep a proof that happened. But a LAPSED claim must not be renewed by
-       * simply saving the form again, or the 8-hour limit would mean nothing: the token is rotated,
-       * which also means a record left in DNS from the previous attempt no longer matches. An old
-       * record lying around proves nothing about the claim being made now.
-       */
-      if (domainVerify.isClaimExpired(mine)) {
-        db.prepare("UPDATE org_sso_domains SET token = ?, token_issued_at = strftime('%s','now'), last_error = NULL WHERE id = ?")
-          .run(domainVerify.newToken(), mine.id);
-      }
+    if (mine && !domainVerify.isClaimExpired(mine)) {
+      stale.delete(d);            // already ours and still live — keep any proof that happened
       continue;
+    }
+    if (mine) {
+      /*
+       * A LAPSED claim is not renewed in place. Renewing silently is what made the 8-hour limit
+       * meaningless: a review held a domain indefinitely at one request per window, and because a
+       * renewal was not a new claim, the operator was told exactly once, on day zero.
+       *
+       * So the row is dropped and re-created: the token changes (a record left over from the
+       * abandoned attempt cannot satisfy the new one), and it counts as a fresh claim, which means
+       * it is notified again. Squatting is not made impossible — it is made loud.
+       */
+      stale.delete(d);
+      db.prepare('DELETE FROM org_sso_domains WHERE id = ?').run(mine.id);
     }
     assertDomainsFree(d, orgId, providerId);
     db.prepare(`INSERT INTO org_sso_domains (id, organization_id, provider_id, domain, token)
@@ -219,28 +235,38 @@ function syncDomains(providerId, orgId, domains) {
  *
  * Failure to send is logged and swallowed: a mail outage must not stop a customer configuring SSO.
  */
-function notifyOperatorOfClaim(req, { domain, orgId, providerName }) {
+function notifyOperatorOfClaim(req, { domains, orgId, providerName }) {
   try {
+    if (!domains || !domains.length) return;
+    // Always log, even with no mail transport — otherwise an instance without email has no record
+    // of a claim at all, and those are exactly the instances least likely to notice.
+    console.log(`[org-sso] domain(s) claimed by org ${orgId} (${providerName}): ${domains.join(', ')}`);
     if (!emailSvc.isConfigured()) return;
-    const admins = db.prepare("SELECT email FROM users WHERE role = 'platform_admin' AND email_alerts = 1").all();
+    // COALESCE, because email_alerts is nullable in practice on older rows and `= 1` silently
+    // excludes NULL — the activation-nudge query already defends this way.
+    const admins = db.prepare("SELECT email FROM users WHERE role = 'platform_admin' AND COALESCE(email_alerts, 1) = 1").all();
     if (!admins.length) return;
     const org = db.prepare('SELECT name FROM organizations WHERE id = ?').get(orgId);
     const who = req.user && req.user.email ? req.user.email : 'an administrator';
+    // ONE message per save listing every domain, not one per domain per admin — fifty admins
+    // claiming ten domains was five hundred messages from a single request.
     const body = [
-      `${who} claimed the sign-in domain ${domain}.`,
+      `${who} claimed ${domains.length} sign-in domain(s):`,
+      '',
+      ...domains.map((d) => `  ${d}`),
       '',
       `Organization: ${org ? org.name : orgId} (${orgId})`,
       `Provider:     ${providerName}`,
       '',
-      'The domain routes nobody until it is verified by a DNS record published in the domain itself,',
-      'and the claim lapses after 8 hours if it is not. No action is needed unless this looks wrong.',
+      'A claimed domain routes nobody until a DNS TXT record proves it, and the claim lapses after',
+      '8 hours if it is not proved. No action is needed unless this looks wrong.',
     ].join('\n');
+    const subject = domains.length === 1
+      ? `[ScreenTinker] SSO domain claimed: ${domains[0]}`
+      : `[ScreenTinker] ${domains.length} SSO domains claimed`;
     for (const a of admins) {
-      emailSvc.sendEmail({
-        to: a.email,
-        subject: `[ScreenTinker] SSO domain claimed: ${domain}`,
-        text: body,
-      }).catch((e) => console.error('[org-sso] claim notification failed:', e && e.message));
+      Promise.resolve(emailSvc.sendEmail({ to: a.email, subject, text: body }))
+        .catch((e) => console.error('[org-sso] claim notification failed:', e && e.message));
     }
   } catch (e) {
     console.error('[org-sso] claim notification failed:', e && e.message);
@@ -292,7 +318,13 @@ function discoveryErrorMessage(e, issuer) {
 function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch((err) => {
     console.error(`[org-sso] unhandled error in ${req.method} ${req.path}:`, err && err.message);
-    if (!res.headersSent) res.status(500).json({ error: 'Something went wrong' });
+    // Wrapped for the same reason as in routes/auth.js: a throw while REPORTING an error would
+    // become an unhandled rejection and take the process down.
+    try {
+      if (!res.headersSent) res.status(500).json({ error: 'Something went wrong' });
+    } catch (e2) {
+      console.error('[org-sso] failed to report an error:', e2 && e2.message);
+    }
   });
 }
 
@@ -358,7 +390,7 @@ router.post('/:orgId/sso', requireOrgAdmin, requireVerifiedAdmin, asyncRoute(asy
 
   // Notified after the transaction commits, so an operator is never told about a claim that rolled
   // back — and never inside it, where a slow mail path would hold a write lock.
-  for (const d of newlyClaimed) notifyOperatorOfClaim(req, { domain: d, orgId: req.orgId, providerName: String(name).trim() });
+  notifyOperatorOfClaim(req, { domains: newlyClaimed, orgId: req.orgId, providerName: String(name).trim() });
 
   // (userId, action, details, deviceId, ipAddress, workspaceId) — the org id is NOT the 4th arg.
   logActivity(req.user.id, 'org_sso_created', `${name} (${slug}) org=${req.orgId}`, null, getClientIp(req));
@@ -372,7 +404,11 @@ router.put('/:orgId/sso/:id', requireOrgAdmin, requireVerifiedAdmin, asyncRoute(
   const { name, issuer, client_id: clientId, client_secret: clientSecret, scopes, email_domains: domains, enabled } = req.body || {};
 
   let cleanDomains = existing.email_domains;
-  if (domains !== undefined) {
+  // `!== undefined` let a null through, and null took the destructive branch: normaliseDomains(null)
+  // is '', which deleted every claimed domain and every DNS proof with it. A client that sends the
+  // field as null on an unrelated save must not log a customer's whole company out.
+  const domainsSupplied = domains !== undefined && domains !== null;
+  if (domainsSupplied) {
     try {
       cleanDomains = normaliseDomains(domains);
       assertDomainsFree(cleanDomains, req.orgId, existing.id);
@@ -401,12 +437,12 @@ router.put('/:orgId/sso/:id', requireOrgAdmin, requireVerifiedAdmin, asyncRoute(
    * missed when that was fixed, which left the race fully open on the route an attacker would
    * actually pick: `await oidc.discover()` on a CHANGED issuer is a round trip whose length the
    * caller's own IdP decides, so it can be held open for the full fetch timeout while a victim
-   * organization claims the domain legitimately. Both rows then hold it, and forEmail's
-   * `ORDER BY created_at` hands routing to the OLDER row — the attacker's.
+   * organization claims the domain legitimately. The UNIQUE constraint on `domain` is the hard
+   * backstop now; this keeps the failure a clean 409 rather than a constraint error.
    */
   try {
     db.transaction(() => {
-      if (domains !== undefined) assertDomainsFree(cleanDomains, req.orgId, existing.id);
+      if (domainsSupplied) assertDomainsFree(cleanDomains, req.orgId, existing.id);
       db.prepare(`
         UPDATE org_sso_providers
            SET name = ?, issuer = ?, client_id = ?, client_secret_enc = ?, scopes = ?, email_domains = ?, enabled = ?,
@@ -422,7 +458,7 @@ router.put('/:orgId/sso/:id', requireOrgAdmin, requireVerifiedAdmin, asyncRoute(
         enabled === undefined ? existing.enabled : (enabled ? 1 : 0),
         existing.id,
       );
-      if (domains !== undefined) newlyClaimed = syncDomains(existing.id, req.orgId, cleanDomains);
+      if (domainsSupplied) newlyClaimed = syncDomains(existing.id, req.orgId, cleanDomains);
     })();
   } catch (e) {
     // A thrown assertDomainsFree carries its own status; anything else is ours and stays generic
@@ -432,7 +468,7 @@ router.put('/:orgId/sso/:id', requireOrgAdmin, requireVerifiedAdmin, asyncRoute(
     return res.status(500).json({ error: 'Could not save that provider' });
   }
 
-  for (const d of newlyClaimed) notifyOperatorOfClaim(req, { domain: d, orgId: req.orgId, providerName: existing.name });
+  notifyOperatorOfClaim(req, { domains: newlyClaimed, orgId: req.orgId, providerName: existing.name });
 
   logActivity(req.user.id, 'org_sso_updated', `${existing.name} (${existing.slug}) org=${req.orgId}`, null, getClientIp(req));
   res.json(toPublic(db.prepare('SELECT * FROM org_sso_providers WHERE id = ?').get(existing.id)));
@@ -451,7 +487,7 @@ router.put('/:orgId/sso/:id', requireOrgAdmin, requireVerifiedAdmin, asyncRoute(
  * matches, or that the redirect URI is registered — only a real authorization round trip does that,
  * and the response says so rather than implying a green tick means "SSO works".
  */
-router.post('/:orgId/sso/:id/test', requireOrgAdmin, asyncRoute(async (req, res) => {
+router.post('/:orgId/sso/:id/test', requireOrgAdmin, requireVerifiedAdmin, asyncRoute(async (req, res) => {
   const row = db.prepare('SELECT * FROM org_sso_providers WHERE id = ? AND organization_id = ?').get(req.params.id, req.orgId);
   if (!row) return res.status(404).json({ error: 'Not found' });
 
@@ -520,21 +556,22 @@ router.post('/:orgId/sso/:id/domains/:domain/verify', requireOrgAdmin, requireVe
   if (row.verified_at) return res.json({ ok: true, domain: row.domain, verified: true, already: true });
 
   /*
-   * A lapsed claim is not checked at all — it is reissued. Checking first would let a squatter keep
-   * an expired claim alive indefinitely by leaving one record in place, which is exactly what the
-   * time limit exists to prevent, and the new token means the old record no longer matches.
+   * A lapsed claim is RELEASED, not reissued.
+   *
+   * Reissuing here renewed the clock, so pressing Verify once per window held a domain forever —
+   * the exact squatting the time limit exists to stop, performed through the endpoint meant to
+   * enforce it. Releasing it frees the domain for anyone else, and re-adding it is an ordinary new
+   * claim: new token, and the operator is notified again.
    */
   if (domainVerify.isClaimExpired(row)) {
-    const token = domainVerify.newToken();
-    db.prepare("UPDATE org_sso_domains SET token = ?, token_issued_at = strftime('%s','now'), last_error = NULL, last_checked_at = strftime('%s','now') WHERE id = ?")
-      .run(token, row.id);
+    db.prepare('DELETE FROM org_sso_domains WHERE id = ?').run(row.id);
+    logActivity(req.user.id, 'org_sso_domain_lapsed', `${row.domain} org=${req.orgId}`, null, getClientIp(req));
     return res.status(409).json({
       ok: false,
       domain: row.domain,
       verified: false,
       expired: true,
-      error: 'That verification expired, so a new record has been issued. Publish the new value and check again.',
-      ...domainVerify.instructions(row.domain, token),
+      error: 'That claim expired and has been released. Add the domain again to get a new record.',
     });
   }
 
@@ -562,9 +599,37 @@ router.post('/:orgId/sso/:id/domains/:domain/verify', requireOrgAdmin, requireVe
 router.delete('/:orgId/sso/:id', requireOrgAdmin, requireVerifiedAdmin, (req, res) => {
   const existing = db.prepare('SELECT * FROM org_sso_providers WHERE id = ? AND organization_id = ?').get(req.params.id, req.orgId);
   if (!existing) return res.status(404).json({ error: 'Not found' });
-  db.prepare('DELETE FROM org_sso_providers WHERE id = ?').run(existing.id);
-  logActivity(req.user.id, 'org_sso_deleted', `${existing.name} (${existing.slug}) org=${req.orgId}`, null, getClientIp(req));
-  res.json({ success: true });
+  /*
+   * Take the domain rows and the accounts with it, in one transaction.
+   *
+   * Deleting only the provider left both behind, and both were unrecoverable in the product:
+   *
+   *   - `domain` is globally UNIQUE and a VERIFIED row never expires, so an orphaned row blocked
+   *     its own domain forever — for this organization and for every other one — while being
+   *     invisible in the API and routing nobody. Re-claiming your own domain returned 409. The only
+   *     way out was SQL.
+   *   - the users this provider established kept pointing at a slug nothing answers to. They could
+   *     not sign in (no provider), could not use a password (auth_provider is not 'local') and
+   *     could not register (address taken).
+   *
+   * Both are handled here, at the moment the intent is known, rather than inferred later from the
+   * absence of configuration — which is what made an unset GOOGLE_CLIENT_ID look like a deletion.
+   */
+  const freed = db.transaction(() => {
+    const domains = db.prepare('DELETE FROM org_sso_domains WHERE provider_id = ?').run(existing.id).changes;
+    // Back to a local account, so the owner can recover it by proving the mailbox — strictly
+    // stronger evidence than the identity-provider assertion that created it.
+    const users = db.prepare("UPDATE users SET auth_provider = 'local', provider_id = NULL WHERE auth_provider = ?")
+      .run(existing.slug).changes;
+    db.prepare('DELETE FROM org_sso_providers WHERE id = ?').run(existing.id);
+    return { domains, users };
+  })();
+
+  logActivity(req.user.id, 'org_sso_deleted',
+    `${existing.name} (${existing.slug}) org=${req.orgId} domains=${freed.domains} users_reset=${freed.users}`,
+    null, getClientIp(req));
+  console.log(`[org-sso] deleted ${existing.slug}: released ${freed.domains} domain(s), returned ${freed.users} account(s) to local`);
+  res.json({ success: true, domains_released: freed.domains, accounts_returned_to_local: freed.users });
 });
 
 module.exports = router;
