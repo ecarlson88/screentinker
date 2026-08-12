@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.9.34-alpha5
+
+### Fixed — the Link button in Settings always said "Authentication required"
+`alpha4` shipped account linking with a button that could never work. It navigated the browser
+straight at the link endpoint, and this app's session is a token held in the page rather than a
+cookie — so the request arrived with no credentials and was refused, every time.
+
+The page now asks the server for the sign-in URL first, using its session, and follows that. Nothing
+about the link itself changed.
+
 ## 1.9.34-alpha4
 
 Two changes to how signing in works, both found by configuring real Google and Microsoft sign-in
