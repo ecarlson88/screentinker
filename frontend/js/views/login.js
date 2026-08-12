@@ -287,7 +287,15 @@ function setupHandlers(config, isSetup) {
   if (isSetup) {
     document.getElementById('loginBtn')?.addEventListener('click', () => doRegister(true));
   } else {
-    document.getElementById('loginBtn')?.addEventListener('click', doLogin);
+    /*
+     * Identifier-first. The button is "Next" until an address has been submitted: we ask the server
+     * what that address uses BEFORE offering a credential, so an SSO-only user is never shown a
+     * password box that is going to be refused, and the org lookup has somewhere to happen.
+     */
+    document.getElementById('loginBtn')?.addEventListener('click', () => {
+      if (identified && !ssoOnlyDomain) return doLogin();
+      identify();
+    });
     document.getElementById('showRegisterBtn')?.addEventListener('click', () => {
       document.getElementById('localAuthForm').style.display = 'none';
       document.getElementById('registerForm').style.display = 'block';
@@ -303,6 +311,40 @@ function setupHandlers(config, isSetup) {
   document.getElementById('loginPassword')?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') isSetup ? doRegister(true) : doLogin();
   });
+
+  /*
+   * Enter in the EMAIL field advances rather than submitting. During first-run setup both fields
+   * are needed at once, so identifier-first is skipped entirely there.
+   */
+  document.getElementById('loginEmail')?.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    if (isSetup) return doRegister(true);
+    if (identified && !ssoOnlyDomain) return doLogin();
+    identify();
+  });
+
+  /*
+   * Editing the address after identifying returns to the identifier step. Someone who mistypes
+   * their domain must get a fresh answer rather than keep the previous domain's one.
+   */
+  document.getElementById('loginEmail')?.addEventListener('input', () => {
+    if (!identified) return;
+    identified = false;
+    applyFormState();
+  });
+
+  /*
+   * Ask what this address uses, then show the right thing. The lookup itself sets ssoOnlyDomain via
+   * setPasswordVisible(), so this only has to decide that we now know who is signing in.
+   */
+  async function identify() {
+    const email = document.getElementById('loginEmail').value.trim();
+    if (!email || !email.includes('@')) { showError(t('auth.error_email_required')); return; }
+    try { await lookupOrgSso(email); } catch { /* lookup failures fall through to the password box */ }
+    identified = true;
+    applyFormState();
+    if (!ssoOnlyDomain) document.getElementById('loginPassword')?.focus();
+  }
 
   async function doLogin() {
     const email = document.getElementById('loginEmail').value.trim();
@@ -509,7 +551,6 @@ function setupHandlers(config, isSetup) {
    * Debounced because this fires while someone types, and the endpoint is rate limited; asking on
    * every keystroke would spend a user's whole budget before they finished their own address.
    */
-  let ssoLookupTimer = null;
   let lastDomainAsked = '';
   const orgSlot = () => document.getElementById('orgSsoSlot');
 
@@ -520,42 +561,66 @@ function setupHandlers(config, isSetup) {
    * on every negative answer matters as much as hiding it: someone who types an SSO-only address,
    * then corrects it to their own, must get the password box back.
    */
-  function setPasswordVisible(visible) {
+  /*
+   * Password visibility has TWO independent drivers, and conflating them is how this got confusing:
+   *
+   *   identified   — identifier-first. The password box does not exist until an address has been
+   *                  submitted, because until then we do not know whether this account uses a
+   *                  password at all. This is what lets the org lookup happen before we offer the
+   *                  wrong thing.
+   *   ssoOnlyDomain — the address belongs to an organization that REQUIRES its own provider. Then a
+   *                  password box is not merely going to fail, it is the wrong thing to show.
+   *
+   * The field appears only when identified AND not SSO-only. Kept as one function so the two can
+   * never disagree about what is on screen.
+   */
+  let identified = false;
+  let ssoOnlyDomain = false;
+
+  function applyFormState() {
+    const showPassword = identified && !ssoOnlyDomain;
+    const show = showPassword ? '' : 'none';
     /*
      * ⚠️ Hide the password FIELD, never its .form-group — the organization SSO slot lives inside
-     * that same group, so hiding the container took the single sign-on button down with it and left
-     * a login page whose only action was "Create Account". Found by looking at a screenshot.
+     * that same group, so hiding the container took the single sign-on button down with it.
      */
-    const show = visible ? '' : 'none';
-    for (const id of ['loginPassword', 'loginPasswordLabel', 'loginBtn']) {
+    for (const id of ['loginPassword', 'loginPasswordLabel']) {
       const el = document.getElementById(id);
       if (el) el.style.display = show;
     }
+
     /*
-     * The instance's own providers go too. They are the operator's, not this organization's, and
-     * they are not domain-confined — so offering "Continue with Google" to someone whose company
-     * requires its own identity provider is offering them the bypass. The server refuses it either
-     * way; this stops the page inviting it.
+     * The primary button is "Next" until an address has been submitted, then "Sign in". One button
+     * rather than two, so there is never a choice about which to press.
      */
-    const instance = document.getElementById('instanceProviders');
-    if (instance) instance.style.display = show;
+    const btn = document.getElementById('loginBtn');
+    if (btn) btn.textContent = identified && !ssoOnlyDomain ? t('auth.sign_in') : t('auth.next');
+    if (btn) btn.style.display = ssoOnlyDomain ? 'none' : '';
+
     /*
-     * "Create Account" goes too. Registration at an SSO-only domain is refused by the server, and
-     * leaving the button was worse than useless: it was the ONLY action left on the card, so the
-     * page invited the one thing that cannot work.
+     * The instance's own providers stay visible at ALL times, by explicit decision: they are the
+     * operator's, they are offered to everyone, and the server refuses them for an SSO-only
+     * organization anyway. (Previously they were hidden for such domains so the page would not
+     * invite the bypass; the cost was a login page that changed shape while you typed.)
+     */
+
+    /*
+     * "Create Account" and "Forgot your password?" DO go for an SSO-only domain: registration there
+     * is refused by the server, and a password reset produces one that can never be used.
      */
     const reg = document.getElementById('showRegisterBtn');
-    if (reg) reg.style.display = show;
-    // The OR divider sits outside #instanceProviders, so hiding those alone left a dangling rule
-    // with nothing beneath it.
-    const divider = document.getElementById('ssoDivider');
-    if (divider) divider.style.display = show;
-    // "Forgot your password?" sits in its own <p>; hide the wrapper so no empty gap is left.
+    if (reg) reg.style.display = ssoOnlyDomain ? 'none' : '';
     const forgot = document.getElementById('forgotLink');
     if (forgot) {
       const wrap = forgot.parentElement && forgot.parentElement.tagName === 'P' ? forgot.parentElement : forgot;
-      wrap.style.display = show;
+      wrap.style.display = ssoOnlyDomain ? 'none' : '';
     }
+  }
+
+  // Kept for the org lookup below, which reasons about SSO-only rather than about identification.
+  function setPasswordVisible(visible) {
+    ssoOnlyDomain = !visible;
+    applyFormState();
   }
 
   async function lookupOrgSso(email) {
@@ -650,11 +715,21 @@ function setupHandlers(config, isSetup) {
     }
   }
 
-  document.getElementById('loginEmail')?.addEventListener('input', (e) => {
-    clearTimeout(ssoLookupTimer);
-    const value = e.target.value;
-    ssoLookupTimer = setTimeout(() => lookupOrgSso(value), 400);
-  });
+  /*
+   * The lookup now runs on SUBMIT (identify()), not on every keystroke.
+   *
+   * Identifier-first made the debounced version both redundant and wrong: redundant because nothing
+   * is shown until an address is submitted anyway, and wrong because it would answer for a
+   * half-typed domain and change the form under someone mid-address. It also spent a rate-limit
+   * budget of 10/min per IP on people who had not finished typing — an office behind one address
+   * could exhaust it without a single sign-in attempt.
+   *
+   * ⚠️ Applied HERE, after the `let identified` / `let ssoOnlyDomain` declarations above. Called any
+   * earlier it would throw on the temporal dead zone, which on this page means a login form that
+   * never renders.
+   */
+  if (isSetup) identified = true;   // first-run setup needs both fields at once
+  applyFormState();
 
   /*
    * Completing an SSO login.

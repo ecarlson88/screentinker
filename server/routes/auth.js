@@ -1158,6 +1158,13 @@ function backToApp(res, params) {
   res.redirect(`/app#/login?${qs}`);
 }
 
+// A link attempt starts from Settings while signed in, so it must end there — bouncing an
+// authenticated user to the login page to report the outcome reads as "you were signed out".
+function backToSettings(res, params) {
+  const qs = new URLSearchParams(params).toString();
+  res.redirect(`/app#/settings?${qs}`);
+}
+
 // Which providers this instance offers. Public: it is what draws the login buttons.
 router.get('/providers', (req, res) => {
   res.json({ providers: oidcProviders.publicList() });
@@ -1233,10 +1240,15 @@ router.post('/sso/start', express.urlencoded({ extended: false }), (req, res) =>
   res.redirect(startUrl);
 });
 
-router.get('/oidc/:slug/start', asyncRoute(async (req, res) => {
-  const provider = oidcProviders.get(req.params.slug);
-  if (!provider) return backToApp(res, { sso_error: 'unknown_provider' });
-
+/**
+ * Begin an OIDC round trip.
+ *
+ * `extra` is merged into the signed transaction, which is how LINK mode is carried: the tx is
+ * server-signed and lives in an httpOnly cookie, so the browser can neither read nor forge which
+ * account a link is for. Login and link therefore share one flow — the same PKCE, state, nonce and
+ * verification — instead of a second copy that drifts.
+ */
+async function beginOidc(req, res, provider, extra = {}, onError = backToApp) {
   try {
     const doc = await oidc.discover(provider.issuer);
     const pkce = oidc.createPkce();
@@ -1244,7 +1256,7 @@ router.get('/oidc/:slug/start', asyncRoute(async (req, res) => {
     const state = oidc.randomToken();
 
     const tx = jwt.sign(
-      { typ: 'oidc-tx', slug: provider.slug, nonce, verifier: pkce.verifier, state },
+      { typ: 'oidc-tx', slug: provider.slug, nonce, verifier: pkce.verifier, state, ...extra },
       config.jwtSecret,
       // HS256 explicitly, and a `typ` the session verifier does not accept: two token kinds signed
       // with one secret must never be interchangeable, even if today only `slug` happens to stop it.
@@ -1269,9 +1281,61 @@ router.get('/oidc/:slug/start', asyncRoute(async (req, res) => {
     url.searchParams.set('code_challenge_method', pkce.method);
     res.redirect(url.toString());
   } catch (err) {
-    console.error(`[oidc] ${req.params.slug} start failed:`, err.message);
-    backToApp(res, { sso_error: 'provider_unavailable' });
+    console.error(`[oidc] ${provider.slug} start failed:`, err.message);
+    onError(res, { sso_error: 'provider_unavailable' });
   }
+}
+
+router.get('/oidc/:slug/start', asyncRoute(async (req, res) => {
+  const provider = oidcProviders.get(req.params.slug);
+  if (!provider) return backToApp(res, { sso_error: 'unknown_provider' });
+  await beginOidc(req, res, provider);
+}));
+
+/*
+ * Link an EXISTING account to an instance-wide provider.
+ *
+ * Signing in with a provider never adopts an account that has a password — that would let anyone who
+ * can make a provider assert an address inherit the account behind it. So the owner proves they are
+ * the owner first, by being signed in, and starts the link themselves. The account is taken from the
+ * SESSION, never from the email in the returned token.
+ *
+ * ⚠️ INSTANCE-WIDE PROVIDERS ONLY. An organization's provider is chosen by a customer; letting one
+ * attach itself to a platform account would hand that customer whatever the account can do. Org
+ * membership arrives through the normal org SSO path, which is domain-confined.
+ */
+/*
+ * Unlink, and set a password in the SAME operation.
+ *
+ * Not two steps. An account whose only credential is a provider has nothing to fall back on the
+ * moment that link is removed, so "unlink now, set a password next" leaves a window — and a failure
+ * in between leaves an account nobody can sign into at all. The new password is therefore required
+ * up front and written in one transaction with the unlink.
+ */
+router.post('/oidc/unlink', requireAuth, (req, res) => {
+  const password = String((req.body || {}).password || '');
+  const user = db.prepare('SELECT id, email, auth_provider, password_hash FROM users WHERE id = ?').get(req.user.id);
+  if (!user) return res.status(404).json({ error: 'Account not found' });
+  if (user.auth_provider === 'local') {
+    return res.status(400).json({ error: 'This account already signs in with a password' });
+  }
+  if (password.length < passwordReset.MIN_PASSWORD_LENGTH) {
+    return res.status(400).json({ error: `Password must be at least ${passwordReset.MIN_PASSWORD_LENGTH} characters` });
+  }
+
+  const was = user.auth_provider;
+  db.prepare("UPDATE users SET auth_provider = 'local', provider_id = NULL, password_hash = ? WHERE id = ?")
+    .run(bcrypt.hashSync(password, 10), user.id);
+  logActivity(user.id, 'auth:sso_unlinked', `was ${was}`, null, getClientIp(req));
+  console.log(`[oidc] ${was} unlinked from ${user.email} (password set)`);
+  res.json({ ok: true, auth_provider: 'local' });
+});
+
+router.get('/oidc/:slug/link/start', requireAuth, asyncRoute(async (req, res) => {
+  const provider = oidcProviders.get(req.params.slug);
+  if (!provider) return backToSettings(res, { sso_error: 'unknown_provider' });
+  if (provider.organizationId) return backToSettings(res, { sso_error: 'not_linkable' });
+  await beginOidc(req, res, provider, { link: req.user.id }, backToSettings);
 }));
 
 router.get('/oidc/:slug/callback', asyncRoute(async (req, res) => {
@@ -1338,7 +1402,9 @@ router.get('/oidc/:slug/callback', asyncRoute(async (req, res) => {
   }
 
   const email = String(claims.email || '').toLowerCase().trim();
-  if (!email) return backToApp(res, { sso_error: 'no_email' });
+  const linking = !!tx.link;
+  const fail = linking ? backToSettings : backToApp;
+  if (!email) return fail(res, { sso_error: 'no_email' });
 
   /*
    * ⚠️ AN ORGANIZATION'S PROVIDER MAY ONLY SPEAK FOR ITS OWN DOMAINS.
@@ -1387,7 +1453,39 @@ router.get('/oidc/:slug/callback', asyncRoute(async (req, res) => {
   // explicit false is still refused, and an org-configured provider still cannot assume anything.
   // See oidcProviders.emailIsVerified() for why that division is the safe one.
   if (!oidcProviders.emailIsVerified(claims, provider)) {
-    return backToApp(res, { sso_error: 'email_unverified' });
+    return fail(res, { sso_error: 'email_unverified' });
+  }
+
+  /*
+   * LINK: attach this provider to the account that STARTED the link, and drop its password.
+   *
+   * The account comes from the signed transaction (i.e. from the session that began this), never
+   * from the returned email — otherwise "linking" would be the very email-keyed takeover the login
+   * path refuses. The email must still match the account's own, because login resolves an account by
+   * the address the provider asserts: linking a different address would produce an account that
+   * cannot be signed into, or would collide with someone else's.
+   *
+   * The password is DELETED rather than kept alongside. One credential at a time is the whole point
+   * — a password left behind is a second way in that the user believes they replaced.
+   */
+  if (linking) {
+    const target = db.prepare('SELECT id, email, auth_provider FROM users WHERE id = ?').get(tx.link);
+    if (!target) return backToSettings(res, { sso_error: 'server_error' });
+    if (target.email.toLowerCase() !== email) {
+      console.warn(`[oidc] link refused: ${provider.slug} asserted ${email} for account ${target.email}`);
+      return backToSettings(res, { sso_error: 'link_email_mismatch' });
+    }
+    // Someone else already signed in with this provider identity. Two accounts must never share one
+    // provider subject, or whoever signs in second silently takes the first one's place.
+    const taken = db.prepare('SELECT id FROM users WHERE provider_id = ? AND auth_provider = ? AND id != ?')
+      .get(String(claims.sub), provider.slug, target.id);
+    if (taken) return backToSettings(res, { sso_error: 'link_already_used' });
+
+    db.prepare('UPDATE users SET auth_provider = ?, provider_id = ?, password_hash = NULL, avatar_url = COALESCE(?, avatar_url) WHERE id = ?')
+      .run(provider.slug, String(claims.sub), claims.picture || null, target.id);
+    logActivity(target.id, 'auth:sso_linked', `provider=${provider.slug}`, null, getClientIp(req));
+    console.log(`[oidc] ${provider.slug} linked to ${target.email} (password cleared)`);
+    return backToSettings(res, { sso_linked: provider.slug });
   }
 
   try {
