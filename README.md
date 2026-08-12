@@ -425,6 +425,13 @@ https://yourdomain.com/api/auth/oidc/<generated-slug>/callback
 The slug is generated rather than chosen so two customers cannot collide on — or guess — each
 other's. A domain may be claimed by only one organization; a second claim is refused.
 
+A customer bringing **Microsoft/Entra** registers a single-tenant application in their own directory
+and uses `https://login.microsoftonline.com/<their-tenant-guid>/v2.0` as the issuer. Because Entra
+does not send `email_verified`, an organization's provider is trusted to assert addresses **once it
+has verified a domain** — the DNS proof is what stands in for the claim, and the provider is confined
+to those domains regardless. A provider that has verified nothing assumes nothing, and an explicit
+`email_verified: false` is refused whoever sends it.
+
 ⚠️ **A provider may only authenticate emails inside the domains it has VERIFIED.** An organization
 supplies its own issuer and client ID, so it controls that identity provider completely and could
 otherwise assert any address at all — including another company's, or an administrator's. Confining
