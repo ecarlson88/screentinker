@@ -74,11 +74,18 @@ function fromEnv(env, slug) {
  * already exempts it from domain confinement — and the Microsoft entry is additionally pinned to one
  * tenant GUID, so only that directory can issue tokens for it.
  *
- * Two limits keep this from becoming the hole the strict check was closing:
+ * An organization's own provider may assume too, but only once it has DNS-verified a domain — the
+ * callback confines it to those domains, so it can only ever speak for names it proved it controls.
+ * Requiring the claim from it as well meant a customer's Entra tenant went green on domain
+ * verification and then failed the login anyway.
+ *
+ * Three limits keep this from becoming the hole the strict check was closing:
  *   - an EXPLICIT `email_verified: false` is always refused. Assuming only ever covers an omitted
  *     claim, never a provider actively saying the address is unverified;
- *   - org-configured providers can never set it (rowToProvider pins it false, and nothing reads it
- *     from the database), so the account-takeover path stays shut.
+ *   - for an org provider it is DERIVED from proof (`verified.length > 0`) and is never a column, so
+ *     a customer cannot switch it on for themselves;
+ *   - domain confinement is unchanged and still runs first, so an org provider that assumes still
+ *     cannot assert an address outside a domain it has proven.
  */
 function emailIsVerified(claims, provider) {
   const asserted = (claims || {}).email_verified;
@@ -211,6 +218,9 @@ function db() {
 }
 
 function rowToProvider(row, secretbox) {
+  // Resolved once: it decides both which addresses this provider may assert and, below, whether it
+  // has proven anything at all.
+  const verified = verifiedDomainsFor(row.id);
   return {
     slug: row.slug,
     name: row.name,
@@ -226,14 +236,26 @@ function rowToProvider(row, secretbox) {
       : null,
     scopes: row.scopes || DEFAULT_SCOPES,
     /*
-     * ⚠️ NEVER settable for an organization's provider, and deliberately not read from the row.
+     * DERIVED from proof, never read from a column.
      *
-     * A customer chooses this provider, so it speaks for the party it vouches for. Letting an org
-     * assume verification would hand back exactly the takeover primitive the strict check exists to
-     * stop. Domain confinement narrows WHICH addresses it may assert; this keeps the assertion
-     * itself honest.
+     * Entra ID v2 omits email_verified, so demanding it refused every customer who brought their own
+     * Microsoft tenant — the domain went green and the login still failed. Requiring a claim
+     * Microsoft does not send is not a security control, it is an outage.
+     *
+     * What makes it safe to stop requiring it is the proof that already gates this provider: the
+     * callback confines it to DNS-verified domains, and an address is only reached here after
+     * passing that. Whoever controls a domain's DNS controls its mail, which is the same trust that
+     * makes a verification link meaningful in the first place.
+     *
+     * So the assumption is tied to having proven SOMETHING. A provider with no verified domain
+     * assumes nothing — belt and braces, because emailAllowedForProvider already refuses it (an
+     * empty allow-list matches no domain), and this way a future refactor that reorders those checks
+     * cannot silently widen it.
+     *
+     * ⚠️ Still never a column. An org must not be able to switch this on for itself; it is a
+     * consequence of DNS proof, not a setting.
      */
-    assumeEmailVerified: false,
+    assumeEmailVerified: verified.length > 0,
     source: 'org',
     organizationId: row.organization_id,
     /*
@@ -244,7 +266,7 @@ function rowToProvider(row, secretbox) {
      * Reading the typed column here would reduce the whole verification feature to a decoration:
      * a tenant could type any company's domain and immediately assert addresses in it.
      */
-    emailDomains: verifiedDomainsFor(row.id).join(','),
+    emailDomains: verified.join(','),
   };
 }
 
