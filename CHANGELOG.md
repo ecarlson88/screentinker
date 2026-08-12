@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.9.34-alpha3
+
+Completes what `alpha2` half-fixed. That release made the operator's own Microsoft button work and
+left customers' Entra tenants broken, which is the wrong way round.
+
+### Fixed — a customer's own Entra tenant was refused after its domain went green
+An organization that brings its own Microsoft tenant publishes the DNS record, watches its domain
+verify, and was then refused at login with `email_unverified`. Entra sends no such claim, and an
+organization's provider was never allowed to assume one.
+
+The refusal fired *after* domain confinement had already passed, so it was not the domain check doing
+its job — it was a second check asking for something Microsoft does not emit. Requiring a claim a
+provider cannot send is not a security control; it is an outage.
+
+An organization's provider is now believed **once it has verified a domain**. The DNS proof is what
+stands in for the claim: whoever controls a domain's DNS controls its mail, which is the same trust
+that makes a verification link meaningful. A provider that has verified nothing still assumes
+nothing, domain confinement is unchanged, and an explicit `email_verified: false` is still refused
+from anyone.
+
+The assumption follows from the proof and is never a stored setting — an organization cannot switch
+it on for itself.
+
 ## 1.9.34-alpha2
 
 Everything in `1.9.34-alpha1`, plus one fix without which the headline feature could not be used with
