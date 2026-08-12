@@ -1248,7 +1248,7 @@ router.post('/sso/start', express.urlencoded({ extended: false }), (req, res) =>
  * account a link is for. Login and link therefore share one flow — the same PKCE, state, nonce and
  * verification — instead of a second copy that drifts.
  */
-async function beginOidc(req, res, provider, extra = {}, onError = backToApp) {
+async function beginOidc(req, res, provider, extra = {}, onError = backToApp, asJson = false) {
   try {
     const doc = await oidc.discover(provider.issuer);
     const pkce = oidc.createPkce();
@@ -1279,9 +1279,20 @@ async function beginOidc(req, res, provider, extra = {}, onError = backToApp) {
     url.searchParams.set('nonce', nonce);
     url.searchParams.set('code_challenge', pkce.challenge);
     url.searchParams.set('code_challenge_method', pkce.method);
+    /*
+     * A LINK start is fetched, not navigated to.
+     *
+     * The session lives in localStorage and travels as an Authorization header, so a top-level
+     * `location.href` to an authenticated route arrives anonymous — which is exactly how this first
+     * shipped, and it 401'd every time. The caller therefore fetches this with its token and gets
+     * the authorize URL back to navigate to itself. The transaction cookie is still set by this
+     * response, because a same-origin fetch stores Set-Cookie normally.
+     */
+    if (asJson) return res.json({ url: url.toString() });
     res.redirect(url.toString());
   } catch (err) {
     console.error(`[oidc] ${provider.slug} start failed:`, err.message);
+    if (asJson) return res.status(502).json({ error: 'The provider could not be reached' });
     onError(res, { sso_error: 'provider_unavailable' });
   }
 }
@@ -1333,9 +1344,12 @@ router.post('/oidc/unlink', requireAuth, (req, res) => {
 
 router.get('/oidc/:slug/link/start', requireAuth, asyncRoute(async (req, res) => {
   const provider = oidcProviders.get(req.params.slug);
-  if (!provider) return backToSettings(res, { sso_error: 'unknown_provider' });
-  if (provider.organizationId) return backToSettings(res, { sso_error: 'not_linkable' });
-  await beginOidc(req, res, provider, { link: req.user.id }, backToSettings);
+  if (!provider) return res.status(404).json({ error: 'Unknown provider' });
+  if (provider.organizationId) {
+    return res.status(400).json({ error: 'Only this server\'s own providers can be linked' });
+  }
+  // JSON, not a redirect — see beginOidc. The browser cannot send a bearer token on a navigation.
+  await beginOidc(req, res, provider, { link: req.user.id }, backToSettings, true);
 }));
 
 router.get('/oidc/:slug/callback', asyncRoute(async (req, res) => {

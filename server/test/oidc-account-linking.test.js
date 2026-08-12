@@ -40,7 +40,7 @@ test('link start requires authentication and refuses org providers', () => {
   const body = handler('get', '/oidc/:slug/link/start');
   assert.match(AUTH, /router\.get\('\/oidc\/:slug\/link\/start', requireAuth/,
     'the link must be startable only by someone already signed in — that is the proof of ownership');
-  assert.match(body, /provider\.organizationId.*not_linkable/s,
+  assert.match(body, /provider\.organizationId[\s\S]{0,160}status\(400\)/,
     "an organization's provider must never attach itself to a platform account");
   assert.match(body, /link: req\.user\.id/,
     'the account must come from the session, not from anything the browser can set');
@@ -87,6 +87,27 @@ test('link failures return to Settings, not the login page', () => {
   assert.match(cb, /const fail = linking \? backToSettings : backToApp/,
     'an authenticated user must not be bounced to a login screen to be told the link failed');
   assert.match(AUTH, /function backToSettings\(res, params\)[\s\S]{0,200}#\/settings/);
+});
+
+test('link start answers with JSON, because a navigation cannot carry a bearer token', () => {
+  /*
+   * Shipped broken once: the Settings button did `location.href = .../link/start`, which is a
+   * top-level navigation. The session lives in localStorage and travels as an Authorization header,
+   * so the request arrived anonymous and requireAuth refused it — "Authentication required" on
+   * every click. The client must FETCH this with its token and navigate to the returned URL.
+   */
+  const body = handler('get', '/oidc/:slug/link/start');
+  assert.match(body, /beginOidc\([^)]*backToSettings, true\)/,
+    'link start must run in JSON mode');
+  assert.match(AUTH, /if \(asJson\) return res\.json\(\{ url: url\.toString\(\) \}\);/,
+    'JSON mode must return the authorize URL rather than a 302');
+
+  const settings = require('fs').readFileSync(
+    require('path').join(__dirname, '..', '..', 'frontend', 'js', 'views', 'settings.js'), 'utf8');
+  assert.match(settings, /await api\.ssoLinkStart\(slug\)/,
+    'the client must fetch the start route so its Authorization header is sent');
+  assert.doesNotMatch(settings, /location\.href = `\/api\/auth\/oidc/,
+    'never navigate straight at the authenticated start route');
 });
 
 test('login and link share one flow, so verification cannot drift between them', () => {

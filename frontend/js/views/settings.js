@@ -607,12 +607,20 @@ export async function render(container) {
       </div>
     `);
     block.querySelectorAll('[data-link-slug]').forEach((btn) => {
-      btn.onclick = () => {
+      btn.onclick = async () => {
         const slug = btn.dataset.linkSlug;
         const name = providers.find((p) => p.slug === slug)?.name || slug;
         // Deliberately blunt: the password is destroyed, and that is the part people miss.
         if (!window.confirm(t('settings.signin_link_warning', { provider: name }))) return;
-        window.location.href = `/api/auth/oidc/${encodeURIComponent(slug)}/link/start`;
+        /*
+         * Fetch the authorize URL, then navigate to it. NOT location.href straight at the start
+         * route: the session is a bearer token in localStorage, so a top-level navigation arrives
+         * with no Authorization header and is refused as anonymous.
+         */
+        try {
+          const { url } = await api.ssoLinkStart(slug);
+          window.location.href = url;
+        } catch (e) { showToast(e.message, 'error'); }
       };
     });
   }
