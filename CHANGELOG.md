@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.9.34-alpha2
+
+Everything in `1.9.34-alpha1`, plus one fix without which the headline feature could not be used with
+Microsoft at all.
+
+### Fixed — Microsoft sign-in could never complete
+The login callback required the identity provider to assert `email_verified: true`. **Entra ID v2
+does not send that claim**, so a Microsoft login would authenticate correctly against the tenant and
+then be refused on the way back with `email_unverified`. Found while configuring a real Entra
+application, before a single sign-in was attempted; the SSO tests checked how the Microsoft issuer
+string is built but never put a Microsoft-shaped token through the policy.
+
+The strict check was itself a fix — an earlier version accepted an omitted claim — and it stays
+exactly as strict for a provider a **customer** configures, because such a provider is chosen by the
+party it vouches for and its bare assertion is worth nothing. What changed is recognising this as a
+question about *who was trusted* rather than about what the token contained: an instance-wide
+provider is chosen by the operator, and a Microsoft entry is pinned to a single tenant GUID, so only
+that directory can issue a token this server will accept.
+
+An explicit `email_verified: false` is still refused from anyone, and an organization's own provider
+can never make the assumption. Google is unchanged — it does send the claim.
+
+Other identity providers that verify addresses without saying so in the token can opt in with
+`OIDC_<SLUG>_ASSUME_EMAIL_VERIFIED=true`.
+
+### Fixed — documentation that would have cost you an afternoon
+`MICROSOFT_CLIENT_SECRET` is read by the server but was missing from the README table. The redirect
+URI must be registered under Entra's **Web** platform, not **SPA** — a SPA registration is rejected
+at the token endpoint, because this exchange runs server-side and sends no browser `Origin`. And the
+`email` optional claim has to be added under *Token configuration → ID*, or the token arrives with no
+address at all.
+
 ## 1.9.34-alpha1
 
 **A prerelease, for the alpha instance.** It is not a production build and no display should be
