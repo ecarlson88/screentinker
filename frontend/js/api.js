@@ -213,6 +213,9 @@ export const api = {
   // Unlink an instance-wide SSO provider. The new password is required in the same call:
   // the account must never sit between credentials.
   ssoUnlink: (password) => request('/auth/oidc/unlink', { method: 'POST', body: JSON.stringify({ password }) }),
+  // Returns { url } to navigate to. Fetched rather than navigated to, because the session is
+  // a bearer token and a top-level navigation cannot carry one.
+  ssoLinkStart: (slug) => request(`/auth/oidc/${encodeURIComponent(slug)}/link/start`),
   totpSetup: () => request('/auth/totp/setup', { method: 'POST' }),
   totpEnable: (code) => request('/auth/totp/enable', { method: 'POST', body: JSON.stringify({ code }) }),
   totpDisable: (code) => request('/auth/totp/disable', { method: 'POST', body: JSON.stringify({ code }) }),
