@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.9.34-alpha6
+
+### Added — a setup guide for single sign-on
+`docs/sso-setup.md`. The README explained what SSO is and listed the settings; it did not say where
+to click, which of several plausible values to use, or what a given failure means. The guide walks
+both the operator configuring Google or Microsoft for the whole instance and an organization admin
+bringing their own provider, and ends with a table of every error the sign-in can produce alongside
+what usually causes it.
+
+Written from configuring real Google and Entra applications rather than from the code, so the
+pitfalls in it are the ones that actually cost time — most of all that the Microsoft tenant setting
+names the directory that *authenticates the user*, which for personal accounts is not the directory
+the application is registered in.
+
 ## 1.9.34-alpha5
 
 ### Fixed — the Link button in Settings always said "Authentication required"
