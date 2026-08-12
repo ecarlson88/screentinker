@@ -210,6 +210,9 @@ export const api = {
 
   // TOTP 2FA (#100) — opt-in per-user, local accounts only. See routes/auth.js.
   totpStatus: () => request('/auth/totp/status'),
+  // Unlink an instance-wide SSO provider. The new password is required in the same call:
+  // the account must never sit between credentials.
+  ssoUnlink: (password) => request('/auth/oidc/unlink', { method: 'POST', body: JSON.stringify({ password }) }),
   totpSetup: () => request('/auth/totp/setup', { method: 'POST' }),
   totpEnable: (code) => request('/auth/totp/enable', { method: 'POST', body: JSON.stringify({ code }) }),
   totpDisable: (code) => request('/auth/totp/disable', { method: 'POST', body: JSON.stringify({ code }) }),

@@ -62,6 +62,16 @@ export async function render(container) {
       <p style="color:var(--text-muted);font-size:12px;margin-top:16px">${t('settings.sso_note', { provider: esc(user.auth_provider || 'SSO') })}</p>
       `}
 
+      <!--
+        Sign-in method (#258). An account has exactly ONE credential: a password, or one
+        instance-wide provider. Linking deletes the password; unlinking requires a new one in the
+        same step, so the account is never briefly left with no way in. Populated by loadSsoLink().
+      -->
+      <div id="ssoLinkBlock" style="border-top:1px solid var(--border);margin-top:20px;padding-top:16px">
+        <h4 style="font-size:14px;margin-bottom:8px">${t('settings.signin_method')}</h4>
+        <p style="color:var(--text-muted);font-size:12px">…</p>
+      </div>
+
       <!-- Two-factor authentication (#100). Populated by load2FA() from /auth/totp/status. -->
       <div id="twoFactorBlock" style="border-top:1px solid var(--border);margin-top:20px;padding-top:16px">
         <h4 style="font-size:14px;margin-bottom:8px">${t('settings.2fa_title')}</h4>
@@ -526,6 +536,87 @@ export async function render(container) {
   // ==================== Two-factor authentication (#100) ====================
   // Drives the merged TOTP backend (/api/auth/totp/*). Re-renders #twoFactorBlock
   // for each state: SSO note / disabled+enroll / recovery-codes / enabled+manage.
+  /*
+   * Sign-in method: password OR one instance-wide provider, never both.
+   *
+   * The warning on the link button is the whole UX: the local password is DELETED, not kept as a
+   * fallback, and someone who does not read that will think they gained a second way in. Unlink
+   * asks for the new password up front for the same reason — the account must never sit between
+   * credentials.
+   *
+   * Only instance-wide providers appear. An organization's provider is chosen by a customer and
+   * must not be attachable to a platform account; the server refuses it too.
+   */
+  async function loadSsoLink() {
+    const block = document.getElementById('ssoLinkBlock');
+    if (!block) return;
+    const head = `<h4 style="font-size:14px;margin-bottom:8px">${t('settings.signin_method')}</h4>`;
+    const muted = 'color:var(--text-muted);font-size:12px';
+    const paint = (inner) => { block.innerHTML = head + inner; };
+
+    let me;
+    try { me = await api.getMe(); }
+    catch (e) { paint(`<p style="${muted}">${esc(e.message)}</p>`); return; }
+
+    let providers = [];
+    try {
+      const res = await fetch('/api/auth/providers');
+      if (res.ok) providers = (await res.json()).providers || [];
+    } catch { /* offline: fall through to the no-providers copy */ }
+
+    if (me.auth_provider && me.auth_provider !== 'local') {
+      const name = providers.find((p) => p.slug === me.auth_provider)?.name || me.auth_provider;
+      paint(`
+        <p style="${muted};margin-bottom:12px">${t('settings.signin_linked', { provider: esc(name) })}</p>
+        <div id="unlinkForm" style="display:none;margin-bottom:12px">
+          <p style="${muted};margin-bottom:8px">${t('settings.signin_unlink_desc')}</p>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+            <div class="form-group"><label>${t('settings.new_password')}</label><input type="password" id="unlinkPw" class="input" autocomplete="new-password"></div>
+            <div class="form-group"><label>${t('settings.confirm_new_password')}</label><input type="password" id="unlinkPw2" class="input" autocomplete="new-password"></div>
+          </div>
+          <button class="btn btn-primary btn-sm" id="unlinkConfirmBtn">${t('settings.signin_unlink_confirm')}</button>
+        </div>
+        <button class="btn btn-secondary btn-sm" id="unlinkBtn">${t('settings.signin_unlink', { provider: esc(name) })}</button>
+      `);
+      document.getElementById('unlinkBtn').onclick = () => {
+        document.getElementById('unlinkForm').style.display = '';
+        document.getElementById('unlinkBtn').style.display = 'none';
+        document.getElementById('unlinkPw').focus();
+      };
+      document.getElementById('unlinkConfirmBtn').onclick = async () => {
+        const pw = document.getElementById('unlinkPw').value;
+        const pw2 = document.getElementById('unlinkPw2').value;
+        if (pw !== pw2) return showToast(t('settings.passwords_dont_match'), 'error');
+        try {
+          await api.ssoUnlink(pw);
+          showToast(t('settings.signin_unlinked_toast'), 'success');
+          loadSsoLink();
+        } catch (e) { showToast(e.message, 'error'); }
+      };
+      return;
+    }
+
+    if (!providers.length) {
+      paint(`<p style="${muted}">${t('settings.signin_password_only')}</p>`);
+      return;
+    }
+    paint(`
+      <p style="${muted};margin-bottom:12px">${t('settings.signin_password_now')}</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${providers.map((p) => `<button class="btn btn-secondary btn-sm" data-link-slug="${esc(p.slug)}">${t('settings.signin_link', { provider: esc(p.name) })}</button>`).join('')}
+      </div>
+    `);
+    block.querySelectorAll('[data-link-slug]').forEach((btn) => {
+      btn.onclick = () => {
+        const slug = btn.dataset.linkSlug;
+        const name = providers.find((p) => p.slug === slug)?.name || slug;
+        // Deliberately blunt: the password is destroyed, and that is the part people miss.
+        if (!window.confirm(t('settings.signin_link_warning', { provider: name }))) return;
+        window.location.href = `/api/auth/oidc/${encodeURIComponent(slug)}/link/start`;
+      };
+    });
+  }
+
   async function load2FA() {
     const block = document.getElementById('twoFactorBlock');
     if (!block) return;
@@ -660,6 +751,32 @@ export async function render(container) {
 
   loadTokens();
   load2FA();
+  loadSsoLink();
+
+  /*
+   * Report the outcome of a link round trip.
+   *
+   * The callback returns to #/settings rather than the login page — an authenticated user bounced
+   * to a login screen to be told "that did not work" reads as having been signed out. Params are
+   * stripped afterwards so a refresh or a copied URL does not replay the message.
+   */
+  (function reportLinkOutcome() {
+    const q = new URLSearchParams((location.hash.split('?')[1] || ''));
+    const linked = q.get('sso_linked');
+    const err = q.get('sso_error');
+    if (!linked && !err) return;
+    if (linked) {
+      showToast(t('settings.signin_linked_toast', { provider: linked }), 'success');
+    } else {
+      const known = ['link_email_mismatch', 'link_already_used', 'not_linkable', 'no_email',
+        'email_unverified', 'verification_failed', 'provider_unavailable', 'provider_refused',
+        'unknown_provider', 'expired', 'bad_state', 'no_code', 'server_error'];
+      const key = known.includes(err) ? `settings.signin_err_${err}` : 'auth.sso_failed';
+      showToast(t(key), 'error');
+    }
+    history.replaceState(null, '', location.pathname + location.search + '#/settings');
+    loadSsoLink();
+  }());
 
   // #73: agency scope reveals a playlist picker (the token's allowlist). Loaded lazily once.
   const tokScopeSel = document.getElementById('tokScope');
