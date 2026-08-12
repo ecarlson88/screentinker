@@ -320,6 +320,10 @@ a hidden plan was invisible to the operator as well as the customer.
 
 #### Single sign-on (OpenID Connect)
 
+> **Setting it up?** [**docs/sso-setup.md**](docs/sso-setup.md) is the step-by-step guide — Google and
+> Microsoft console walkthroughs, per-organization SSO, account linking, and a table of every error
+> code with its actual cause. The rest of this section is the reference.
+
 Any OIDC provider works — Google, Microsoft/Entra, Okta, Auth0, Keycloak, Authentik, Zitadel — through
 one flow: **Authorization Code with PKCE, run server-side**. The browser never talks to the provider
 directly, so there is no SDK to load and no third-party script origin to allow in the CSP.
