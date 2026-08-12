@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.9.34-alpha4
+
+Two changes to how signing in works, both found by configuring real Google and Microsoft sign-in
+rather than by reading the code.
+
+### Added — an existing account can move to single sign-on
+Signing in with a provider has always refused to take over an account that already has a password.
+That refusal is right: otherwise anyone who could get a provider to assert your address would inherit
+your account. But the way out — sign in with your password, then link from Settings — had never been
+built, so it was a dead end. An account created with a password simply could not use single sign-on.
+
+**Settings → Sign-in method** now offers it. An account with a password can link one of the
+providers this server offers; an account on a provider can unlink back to a password.
+
+An account has exactly **one** credential. Linking **deletes** the password, and the confirmation
+says so plainly, because a password left behind is a second way in that you believe you replaced.
+Unlinking asks for the new password first and applies both changes together, so the account is never
+left, even briefly, with no way to sign in.
+
+The account being linked is the one you are **signed in as** — never whichever account matches the
+email the provider returns. That is what separates linking from the takeover the login page refuses.
+Only the providers configured on this server can be linked; an organization's own provider cannot
+attach itself to an account.
+
+### Changed — the login page asks who you are before how you sign in
+The password box now appears once you have entered your email address and continued, rather than
+sitting there from the start. That is what lets the page ask whether your organization uses single
+sign-on *before* offering you a credential: if it does, you are shown that instead of a password box
+that was going to be refused. Correcting your address takes you back a step so the answer matches
+what you actually typed.
+
+The address is no longer looked up on every keystroke. It answered for half-finished domains, changed
+the form under you mid-address, and could exhaust a shared office IP's lookup budget before anyone
+had tried to sign in.
+
+Google and Microsoft buttons now stay visible throughout, including for organizations that require
+their own provider. Such a login is still refused by the server; the page no longer changes shape
+while you type.
+
 ## 1.9.34-alpha3
 
 Completes what `alpha2` half-fixed. That release made the operator's own Microsoft button work and
