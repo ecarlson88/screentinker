@@ -52,8 +52,39 @@ function fromEnv(env, slug) {
     clientId,
     clientSecret: (env[envKey(slug, 'CLIENT_SECRET')] || '').trim() || null,
     scopes: (env[envKey(slug, 'SCOPES')] || '').trim() || DEFAULT_SCOPES,
+    // Escape hatch for an IdP that verifies addresses but does not say so in the token. Off unless
+    // the operator sets it, and it only ever covers an ABSENT claim — see emailIsVerified().
+    assumeEmailVerified: /^(1|true|yes)$/i.test((env[envKey(slug, 'ASSUME_EMAIL_VERIFIED')] || '').trim()),
     source: 'env',
   };
+}
+
+/**
+ * May this provider's assertion of `email` be treated as verified?
+ *
+ * The login callback used to demand `claims.email_verified === true` outright. That is correct for a
+ * provider a CUSTOMER configured — such a provider is chosen by the party it vouches for, so
+ * anything it merely asserts is worth nothing — but it made Microsoft sign-in impossible, because
+ * **Entra ID v2 does not emit the claim at all**. Every Entra login authenticated successfully and
+ * was then refused with `email_unverified`.
+ *
+ * The distinction that resolves it: `users.email_verified` is OUR state and this is the IdP's claim.
+ * Whether an address is trustworthy is a decision about WHO WE TRUSTED, not a field we can insist a
+ * provider populate. An instance-wide provider was chosen by the operator — the same trust that
+ * already exempts it from domain confinement — and the Microsoft entry is additionally pinned to one
+ * tenant GUID, so only that directory can issue tokens for it.
+ *
+ * Two limits keep this from becoming the hole the strict check was closing:
+ *   - an EXPLICIT `email_verified: false` is always refused. Assuming only ever covers an omitted
+ *     claim, never a provider actively saying the address is unverified;
+ *   - org-configured providers can never set it (rowToProvider pins it false, and nothing reads it
+ *     from the database), so the account-takeover path stays shut.
+ */
+function emailIsVerified(claims, provider) {
+  const asserted = (claims || {}).email_verified;
+  if (asserted === true) return true;
+  if (asserted === undefined || asserted === null) return !!(provider && provider.assumeEmailVerified);
+  return false;   // explicit false, or anything else the provider chose to send
 }
 
 /**
@@ -75,6 +106,8 @@ function list(env = process.env) {
       clientId: googleId,
       clientSecret: (env.GOOGLE_CLIENT_SECRET || '').trim() || null,
       scopes: DEFAULT_SCOPES,
+      // Google DOES send email_verified. Nothing to assume, so it stays strict.
+      assumeEmailVerified: false,
       source: 'env',
     });
     seen.add('google');
@@ -117,6 +150,13 @@ function list(env = process.env) {
         clientId: msId,
         clientSecret: (env.MICROSOFT_CLIENT_SECRET || '').trim() || null,
         scopes: DEFAULT_SCOPES,
+        /*
+         * Entra ID v2 never sends email_verified, so demanding it refused every Microsoft login.
+         * Safe here specifically because this entry is operator-chosen AND pinned to one tenant
+         * GUID above: only that directory can issue a token whose `iss` matches. An explicit
+         * email_verified:false is still refused — see emailIsVerified().
+         */
+        assumeEmailVerified: true,
         source: 'env',
       });
       seen.add('microsoft');
@@ -185,6 +225,15 @@ function rowToProvider(row, secretbox) {
       ? (secretbox.decrypt(row.client_secret_enc) ?? (() => { throw new Error('client secret could not be decrypted — re-enter it'); })())
       : null,
     scopes: row.scopes || DEFAULT_SCOPES,
+    /*
+     * ⚠️ NEVER settable for an organization's provider, and deliberately not read from the row.
+     *
+     * A customer chooses this provider, so it speaks for the party it vouches for. Letting an org
+     * assume verification would hand back exactly the takeover primitive the strict check exists to
+     * stop. Domain confinement narrows WHICH addresses it may assert; this keeps the assertion
+     * itself honest.
+     */
+    assumeEmailVerified: false,
     source: 'org',
     organizationId: row.organization_id,
     /*
@@ -396,5 +445,5 @@ function ssoOnlyForUser(user) {
 
 module.exports = {
   list, get, publicList, getOrgProvider, ownerOf, forEmail,
-  ssoOnlyForEmail, ssoOnlyForUser, DEFAULT_SCOPES, SLUG_RE,
+  ssoOnlyForEmail, ssoOnlyForUser, emailIsVerified, DEFAULT_SCOPES, SLUG_RE,
 };

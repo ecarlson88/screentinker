@@ -344,8 +344,16 @@ is filled in for you and their slugs are `google` and `microsoft`:
 | Variable | Description |
 |----------|-------------|
 | `GOOGLE_CLIENT_ID` | OAuth 2.0 client ID from [Google Cloud Console](https://console.cloud.google.com) |
+| `GOOGLE_CLIENT_SECRET` | Optional — PKCE means a public client works |
 | `MICROSOFT_CLIENT_ID` | Application (client) ID from the [Azure portal](https://portal.azure.com) |
 | `MICROSOFT_TENANT_ID` | **Your tenant GUID — required.** `common`/`organizations` are refused |
+| `MICROSOFT_CLIENT_SECRET` | Required in practice — register the redirect URI under the **Web** platform, which Entra treats as a confidential client. A **SPA** registration is rejected at the token endpoint, because this exchange runs server-side and sends no browser `Origin` |
+
+Register the redirect URI under **Web**, add the **`email`** optional claim under *Token configuration →
+ID*, and note that **Entra ID v2 does not send `email_verified`** — ScreenTinker treats a
+tenant-pinned Microsoft entry as vouching for the address rather than demanding a claim Microsoft
+never emits. An explicit `email_verified: false` is still refused, and an organization's own provider
+can never make that assumption.
 
 ⚠️ **Multi-tenant Microsoft (`common`) is deliberately refused, and Microsoft sign-in stays disabled
 until you set a tenant GUID.** Two reasons that point the same way. It cannot work: Microsoft's
@@ -366,6 +374,7 @@ OIDC_OKTA_CLIENT_ID=0oa...
 OIDC_OKTA_NAME=Okta                      # optional button label
 OIDC_OKTA_CLIENT_SECRET=...              # optional — PKCE means a public client works
 OIDC_OKTA_SCOPES=openid email profile    # optional
+OIDC_OKTA_ASSUME_EMAIL_VERIFIED=true     # only if the IdP verifies addresses but omits the claim
 ```
 
 The issuer is the base URL whose `/.well-known/openid-configuration` describes the provider; endpoints

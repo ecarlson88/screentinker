@@ -1381,9 +1381,14 @@ router.get('/oidc/:slug/callback', asyncRoute(async (req, res) => {
    * anyone who can type an address into a sloppy IdP arrive as its owner. Providers that omit the
    * claim entirely are treated as "not asserted", which is the same answer.
    */
-  // `=== false` accepted an OMITTED claim, which is the opposite of what the comment above says and
-  // what Azure AD v2 actually sends (it omits it). Absent means not asserted, which is not verified.
-  if (claims.email_verified !== true) return backToApp(res, { sso_error: 'email_unverified' });
+  // `=== false` accepted an OMITTED claim, which is the opposite of what the comment above says.
+  // But requiring `=== true` refused every Microsoft login, because Azure AD v2 omits the claim
+  // entirely — so the policy now depends on WHO the provider is, not only on what it sent. An
+  // explicit false is still refused, and an org-configured provider still cannot assume anything.
+  // See oidcProviders.emailIsVerified() for why that division is the safe one.
+  if (!oidcProviders.emailIsVerified(claims, provider)) {
+    return backToApp(res, { sso_error: 'email_unverified' });
+  }
 
   try {
     const result = upsertFederatedUser({ claims, email, provider, req });
