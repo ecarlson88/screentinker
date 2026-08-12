@@ -13,8 +13,8 @@ android {
         targetSdk = 34
         // Env-overridable so device-owner reinstalls (which require an ever-increasing
         // versionCode — downgrades are blocked) don't churn this file each build.
-        versionCode = (System.getenv("VERSION_CODE") ?: findProperty("VERSION_CODE") as String? ?: "110").toInt()
-        versionName = System.getenv("VERSION_NAME") ?: findProperty("VERSION_NAME") as String? ?: "1.9.34-alpha4"
+        versionCode = (System.getenv("VERSION_CODE") ?: findProperty("VERSION_CODE") as String? ?: "111").toInt()
+        versionName = System.getenv("VERSION_NAME") ?: findProperty("VERSION_NAME") as String? ?: "1.9.34-alpha5"
     }
 
     signingConfigs {
