@@ -149,6 +149,27 @@ class MainActivity : AppCompatActivity() {
 
         // Fullscreen immersive
         @Suppress("DEPRECATION")
+        /*
+         * Ask for a full-bleed window through BOTH APIs.
+         *
+         * systemUiVisibility has been deprecated since API 30 and some OEM builds honour it only
+         * partially: `dumpsys window` on one RK356x box reported `init=1920x1080 app=1920x1024`,
+         * i.e. the firmware kept reserving 56px for a navigation bar that was set to hide, so the
+         * app was never given those pixels to paint. WindowCompat is the supported route on those
+         * builds. Both are set because neither is reliable alone across signage hardware: the
+         * legacy flags still carry older devices, the compat API carries newer and OEM ones.
+         *
+         * Verify per device rather than assume — `adb shell dumpsys window displays` should show
+         * app= equal to init=. If it still does not, the reservation is a firmware behaviour no
+         * app-side call can override and it has to be turned off on the device.
+         */
+        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
+        androidx.core.view.WindowInsetsControllerCompat(window, window.decorView).apply {
+            hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior =
+                androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+        @Suppress("DEPRECATION")
         window.decorView.systemUiVisibility = (
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
             View.SYSTEM_UI_FLAG_FULLSCREEN or
@@ -370,12 +391,57 @@ class MainActivity : AppCompatActivity() {
     // (playerView/imageView/youtubeWebView) and multi-zone (ZoneManager renders into
     // the same rootView). Values mirror the dashboard: landscape / portrait /
     // landscape-flipped / portrait-flipped.
-    private fun applyOrientation(orientation: String) {
-        if (orientation == currentOrientation) return
-        currentOrientation = orientation
+    /**
+     * The size of the WINDOW we are allowed to paint, measured NOW.
+     *
+     * ⚠️ Deliberately the window and not the display. On a box whose firmware keeps reserving space
+     * for a system bar, `dumpsys window` reports e.g. `init=1920x1080 app=1920x1024`: the panel is
+     * 1080 tall but the window is 56px shorter, and those 56px are simply not ours to draw in.
+     * Sizing the stage to the DISPLAY there would not fill the gap — it would push the bottom of
+     * every asset outside the window and silently crop it, which is worse than a border.
+     *
+     * The original defect was not which size was read but WHEN: `resources.displayMetrics` was read
+     * once, while a bar was still on screen, and written into rootView's layoutParams for good.
+     * Immersive mode is a request — bars hide and the window grows a few frames later — so a
+     * playlist arriving first froze the stage at bar-sized dimensions, leaving dead space exactly
+     * the size of a bar that had since vanished. It looked random because it was a race, and
+     * rendering the cached playlist immediately at boot made losing it the common case.
+     *
+     * So: read it late, read it again whenever the window changes, and never cache it across a
+     * window resize. See reapplyOrientation().
+     */
+    private fun windowSize(): Pair<Float, Float> {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val b = windowManager.currentWindowMetrics.bounds
+            return b.width().toFloat() to b.height().toFloat()
+        }
         val m = resources.displayMetrics
-        val w = m.widthPixels.toFloat()
-        val h = m.heightPixels.toFloat()
+        return m.widthPixels.toFloat() to m.heightPixels.toFloat()
+    }
+
+    /** Stage size last applied, so a stage sized during a transient window state can heal. */
+    private var appliedStageW = 0f
+    private var appliedStageH = 0f
+
+    /**
+     * Re-run the current orientation against the panel size as it is NOW.
+     *
+     * Called when the window settles (focus regained, bars finally hidden). Without this, a stage
+     * measured too early is permanent: applyOrientation() returns immediately when the orientation
+     * string has not changed, and it never changes on a display that has always been landscape.
+     */
+    private fun reapplyOrientation() {
+        applyOrientation(currentOrientation ?: "landscape")
+    }
+
+    private fun applyOrientation(orientation: String) {
+        val (w, h) = windowSize()
+        // The guard compares the measured SIZE as well as the orientation. Comparing the string
+        // alone is what made a bad measurement unrecoverable.
+        if (orientation == currentOrientation && w == appliedStageW && h == appliedStageH) return
+        currentOrientation = orientation
+        appliedStageW = w
+        appliedStageH = h
         val (rot, swap) = when (orientation) {
             "portrait" -> 90f to true
             "portrait-flipped" -> 270f to true
@@ -1511,6 +1577,16 @@ class MainActivity : AppCompatActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
+            /*
+             * Re-measure the stage once the window has settled.
+             *
+             * Hiding the bars is asynchronous, so the window is often still bar-sized when the
+             * first playlist arrives and sizes the stage. Without this the mistake is permanent:
+             * applyOrientation() used to return immediately whenever the orientation string was
+             * unchanged, and it never changes on a display that has always been landscape. Posting
+             * it runs after this layout pass, when the window is whatever it is finally going to be.
+             */
+            rootView.post { reapplyOrientation() }
             @Suppress("DEPRECATION")
             window.decorView.systemUiVisibility = (
                 View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
