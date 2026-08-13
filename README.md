@@ -630,6 +630,10 @@ Use this in local dev when running against a fresh production database clone to 
 - **Sequential send pattern** through the offline-alert backlog — avoids Graph's per-app concurrent-send throttling (HTTP 429 `ApplicationThrottled`)
 - **Per-user opt-out** via the `email_alerts` toggle in Settings → Account; respects user preference before any Graph call
 
+> **Running one day to day?** [**docs/operations.md**](docs/operations.md) is the runbook —
+> deploy and rollback for both shapes, how to verify a deploy actually took, the served-APK rules,
+> and the traps that have cost real time.
+
 ### Production Deployment
 
 For production, put the app behind a reverse proxy (nginx, Caddy, etc.) with SSL:
