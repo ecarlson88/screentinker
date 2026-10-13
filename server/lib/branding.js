@@ -60,4 +60,81 @@ function publicBranding(row) {
   return out;
 }
 
-module.exports = { resolveBranding, platformDefaultRow, publicBranding, HARDCODED_BRANDING, PLATFORM_DEFAULT_ID };
+// A favicon URL the player may emit: http(s), or a same-origin absolute path.
+// Everything else - javascript:, data:, protocol-relative //host, backslash tricks - is null.
+// Used both to reject a bad value at save time and to drop one already stored at render time.
+function safeFaviconUrl(url) {
+  if (typeof url !== 'string') return null;
+  const u = url.trim();
+  if (!u || u.length > 2048 || /[\s\\]/.test(u)) return null;
+  if (/^\/(?!\/)/.test(u)) return u;
+  if (!/^https?:\/\//i.test(u)) return null;
+  try { new URL(u); return u; } catch (e) { return null; }
+}
+
+// True when a save-time favicon_url is acceptable: absent/empty (clears it) or a safe URL.
+function isAcceptableFaviconUrl(url) {
+  if (url === undefined || url === null || url === '') return true;
+  return safeFaviconUrl(url) !== null;
+}
+
+// The two fields the web player shows (tab title + favicon), already sanitized. Never custom_css:
+// that is platform-admin-only and has no business on a screen.
+function playerBrand(row) {
+  const name = row && typeof row.brand_name === 'string' ? row.brand_name.trim().slice(0, 200) : '';
+  return {
+    brand_name: name || HARDCODED_BRANDING.brand_name,
+    favicon_url: safeFaviconUrl(row && row.favicon_url),
+  };
+}
+
+// The player brand for a device: its workspace's branding, else the platform default (the same
+// order the authed dashboard uses). Null when the row is missing or the lookup fails, so callers
+// can omit the field and the player keeps what it already shows.
+function playerBrandForDevice(db, deviceId) {
+  try {
+    const d = db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(deviceId);
+    if (!d) return null;
+    return playerBrand(resolveBranding(db, { workspaceId: d.workspace_id || null }));
+  } catch (e) { return null; }
+}
+
+// Push the current brand to these devices' live sockets (or the replica holding them). Offline
+// screens are skipped: they get it in device:paired on their next register. Never throws.
+function pushPlayerBrand(io, db, deviceIds) {
+  if (!io || !deviceIds || !deviceIds.length) return;
+  try {
+    const deviceNs = io.of('/device');
+    const relay = require('./mesh/command-relay');
+    for (const id of deviceIds) {
+      const brand = playerBrandForDevice(db, id);
+      if (!brand) continue;
+      const room = deviceNs.adapter.rooms.get(id);
+      if (room && room.size > 0) deviceNs.to(id).emit('device:branding', { brand });
+      else { try { relay.relayToAttached(db, id, 'device:branding', { brand }); } catch (e) { /* offline */ } }
+    }
+  } catch (e) { /* best effort: the next register carries it */ }
+}
+
+// After a workspace's branding is saved: every screen in that workspace.
+function pushPlayerBrandToWorkspace(io, db, workspaceId) {
+  if (!io || !workspaceId) return;
+  try {
+    pushPlayerBrand(io, db, db.prepare('SELECT id FROM devices WHERE workspace_id = ?').all(workspaceId).map(d => d.id));
+  } catch (e) { /* best effort */ }
+}
+
+// After the platform default is saved: the screens that inherit it (workspace with no row of its own).
+function pushPlayerBrandToInheritors(io, db) {
+  if (!io) return;
+  try {
+    pushPlayerBrand(io, db, db.prepare(`SELECT id FROM devices WHERE workspace_id IS NOT NULL
+      AND workspace_id NOT IN (SELECT workspace_id FROM white_labels WHERE workspace_id IS NOT NULL)`).all().map(d => d.id));
+  } catch (e) { /* best effort */ }
+}
+
+module.exports = {
+  resolveBranding, platformDefaultRow, publicBranding, HARDCODED_BRANDING, PLATFORM_DEFAULT_ID,
+  safeFaviconUrl, isAcceptableFaviconUrl, playerBrand, playerBrandForDevice, pushPlayerBrand,
+  pushPlayerBrandToWorkspace, pushPlayerBrandToInheritors,
+};

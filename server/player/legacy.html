@@ -277,7 +277,7 @@
 <body>
   <!-- Setup Screen -->
   <div id="setupScreen">
-    <h1>ScreenTinker</h1>
+    <h1 data-brand-name>ScreenTinker</h1>
     <div class="subtitle">Web Player</div>
     <div class="form" id="urlForm">
       <label>Server URL</label>
@@ -311,7 +311,7 @@
   <!-- Status Overlay -->
   <div id="statusOverlay" style="display:none">
     <div class="spinner"></div>
-    <h2>ScreenTinker</h2>
+    <h2 data-brand-name>ScreenTinker</h2>
     <p id="statusText" data-i18n="connecting">Connecting...</p>
   </div>
 
@@ -381,7 +381,7 @@ const PLAYER_I18N = {
     pairing_hint: "Enter this code in the dashboard to pair this display",
     connecting: "Connecting...",
     connecting_muted: "Connecting (audio muted)...",
-    info_title: "ScreenTinker Web Player",
+    info_title: "{brand} Web Player",
     info_close_hint: "Press Back again or click to close",
     info_device_id: "Device ID",
     info_device_name: "Device Name",
@@ -411,7 +411,7 @@ const PLAYER_I18N = {
     pairing_hint: "Ingresa este c\xF3digo en el panel para vincular esta pantalla",
     connecting: "Conectando...",
     connecting_muted: "Conectando (audio silenciado)...",
-    info_title: "Reproductor web ScreenTinker",
+    info_title: "Reproductor web {brand}",
     info_close_hint: "Presiona Atr\xE1s de nuevo o haz clic para cerrar",
     info_device_id: "ID del dispositivo",
     info_device_name: "Nombre del dispositivo",
@@ -441,7 +441,7 @@ const PLAYER_I18N = {
     pairing_hint: "Saisissez ce code dans le tableau de bord pour apparier cet \xE9cran",
     connecting: "Connexion...",
     connecting_muted: "Connexion (audio coup\xE9)...",
-    info_title: "Lecteur web ScreenTinker",
+    info_title: "Lecteur web {brand}",
     info_close_hint: "Appuyez \xE0 nouveau sur Retour ou cliquez pour fermer",
     info_device_id: "ID de l\u2019appareil",
     info_device_name: "Nom de l\u2019appareil",
@@ -471,7 +471,7 @@ const PLAYER_I18N = {
     pairing_hint: "Geben Sie diesen Code im Dashboard ein, um diesen Bildschirm zu koppeln",
     connecting: "Verbindung wird hergestellt...",
     connecting_muted: "Verbindung (Audio stummgeschaltet)...",
-    info_title: "ScreenTinker Web-Player",
+    info_title: "{brand} Web-Player",
     info_close_hint: "Erneut Zur\xFCck dr\xFCcken oder klicken zum Schlie\xDFen",
     info_device_id: "Ger\xE4te-ID",
     info_device_name: "Ger\xE4tename",
@@ -501,7 +501,7 @@ const PLAYER_I18N = {
     pairing_hint: "Digite este c\xF3digo no painel para parear esta tela",
     connecting: "Conectando...",
     connecting_muted: "Conectando (\xE1udio mudo)...",
-    info_title: "Player web ScreenTinker",
+    info_title: "Player web {brand}",
     info_close_hint: "Pressione Voltar novamente ou clique para fechar",
     info_device_id: "ID do dispositivo",
     info_device_name: "Nome do dispositivo",
@@ -966,6 +966,7 @@ function loadLayoutCache() {
     delete cfg.deviceId;
     delete cfg.deviceToken;
     delete cfg.pairingCode;
+    delete cfg.brand;
     cfg.paired = false;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     localStorage.removeItem("st_install_id" + SCREEN_SUFFIX);
@@ -984,6 +985,52 @@ function loadLayoutCache() {
 let socket = null;
 let throttleHoldTimer = null;
 let config = getConfig();
+const SERVED_BRAND = window.__playerConfig && window.__playerConfig.brand || null;
+let brandName = SERVED_BRAND && SERVED_BRAND.brand_name || "ScreenTinker";
+const brandTitle = () => _t("info_title").replace("{brand}", () => brandName);
+function brandFrom(b) {
+  if (!b || typeof b.brand_name !== "string" || !b.brand_name) return null;
+  const icon = typeof b.favicon_url === "string" ? b.favicon_url : "";
+  const okIcon = /^https?:\/\//i.test(icon) || /^\/(?!\/)/.test(icon);
+  return { brand_name: b.brand_name, favicon_url: okIcon && !/[\s\\]/.test(icon) ? icon : null };
+}
+function applyBrand(b) {
+  const brand = brandFrom(b);
+  if (!brand) return;
+  try {
+    brandName = brand.brand_name;
+    document.title = brand.brand_name + " Player";
+    Array.prototype.forEach.call(document.querySelectorAll("[data-brand-name]"), (el) => {
+      el.textContent = brandName;
+    });
+    Array.prototype.forEach.call(document.querySelectorAll("[data-brand-title]"), (el) => {
+      el.textContent = brandTitle();
+    });
+    let link = document.querySelector('link[rel="icon"]');
+    if (brand.favicon_url) {
+      if (!link) {
+        link = document.createElement("link");
+        link.setAttribute("rel", "icon");
+        document.head.appendChild(link);
+      }
+      link.setAttribute("href", brand.favicon_url);
+    } else if (link && link.parentNode) {
+      link.parentNode.removeChild(link);
+    }
+  } catch (e) {
+  }
+}
+function adoptBrand(b) {
+  const brand = brandFrom(b);
+  if (!brand) return;
+  config.brand = brand;
+  applyBrand(brand);
+}
+function forgetBrand() {
+  delete config.brand;
+  applyBrand(SERVED_BRAND || { brand_name: "ScreenTinker", favicon_url: null });
+}
+applyBrand(config.brand || SERVED_BRAND);
 function moveToServer(rawUrl, handoffKey) {
   return __async(this, null, function* () {
     const emitLog = (m) => {
@@ -2086,7 +2133,8 @@ if (VIEWER_MODE) {
     {
       const tapOverlay = document.createElement("div");
       tapOverlay.style.cssText = "position:fixed;top:0;right:0;bottom:0;left:0;background:#111827;z-index:2000;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer";
-      tapOverlay.innerHTML = '\n          <h1 style="color:#3b82f6;font-size:3.6rem;font-family:sans-serif;margin-bottom:1.2rem">ScreenTinker</h1>\n          <p style="color:#94a3b8;font-size:1.8rem;font-family:sans-serif">Tap anywhere to start</p>\n          <p style="color:#64748b;font-size:1.3rem;font-family:sans-serif;margin-top:2.4rem">Audio requires user interaction</p>\n        ';
+      tapOverlay.innerHTML = '\n          <h1 data-brand-name style="color:#3b82f6;font-size:3.6rem;font-family:sans-serif;margin-bottom:1.2rem"></h1>\n          <p style="color:#94a3b8;font-size:1.8rem;font-family:sans-serif">Tap anywhere to start</p>\n          <p style="color:#64748b;font-size:1.3rem;font-family:sans-serif;margin-top:2.4rem">Audio requires user interaction</p>\n        ';
+      tapOverlay.querySelector("[data-brand-name]").textContent = brandName;
       tapOverlay.onclick = () => {
         unlockAudio();
         tapOverlay.remove();
@@ -2635,6 +2683,7 @@ function connect(serverUrl) {
     config.paired = true;
     config.deviceName = data.name;
     if (data && data.settings_pin) config.settingsPin = String(data.settings_pin);
+    if (data && data.brand) adoptBrand(data.brand);
     saveConfig(config);
     console.log("Paired as:", data.name);
     document.getElementById("setupScreen").style.display = "none";
@@ -2646,6 +2695,7 @@ function connect(serverUrl) {
     delete config.deviceId;
     delete config.deviceToken;
     config.paired = false;
+    forgetBrand();
     try {
       if (typeof clearVegaIdentity === "function") clearVegaIdentity();
     } catch (e) {
@@ -2667,6 +2717,11 @@ function connect(serverUrl) {
       saveConfig(config);
       console.log("[settings] PIN updated from the dashboard");
     }
+  });
+  socket.on("device:branding", (data) => {
+    if (!data || !data.brand) return;
+    adoptBrand(data.brand);
+    saveConfig(config);
   });
   socket.on("device:unpaired", (data) => {
     console.warn("Device not found on server \u2014 clearing credentials");
@@ -6846,7 +6901,7 @@ function renderCaptureCanvas() {
       ctx.fillStyle = "#3b82f6";
       ctx.font = "bold 28px sans-serif";
       ctx.textAlign = "center";
-      ctx.fillText("ScreenTinker Web Player", W / 2, H / 2 - 40);
+      ctx.fillText(brandTitle(), W / 2, H / 2 - 40);
       ctx.fillStyle = "#94a3b8";
       ctx.font = "16px sans-serif";
       const item = playlist[currentIndex];
@@ -7084,7 +7139,8 @@ function toggleScreenOff() {
 const infoDiv = document.createElement("div");
 infoDiv.id = "infoOverlay";
 infoDiv.style.cssText = "position:fixed;top:0;right:0;bottom:0;left:0;background:rgba(0,0,0,0.85);z-index:800;display:none;flex-direction:column;align-items:center;justify-content:center;color:#f1f5f9;font-family:-apple-system,sans-serif";
-infoDiv.innerHTML = '\n      <h2 style="color:#3b82f6;margin-bottom:16px">'.concat(_t("info_title"), '</h2>\n      <div style="font-size:14px;line-height:2;text-align:center;color:#94a3b8" id="infoContent"></div>\n      <p style="margin-top:24px;font-size:12px;color:#64748b">').concat(_t("info_close_hint"), "</p>\n    ");
+infoDiv.innerHTML = '\n      <h2 data-brand-title style="color:#3b82f6;margin-bottom:16px"></h2>\n      <div style="font-size:14px;line-height:2;text-align:center;color:#94a3b8" id="infoContent"></div>\n      <p style="margin-top:24px;font-size:12px;color:#64748b">'.concat(_t("info_close_hint"), "</p>\n    ");
+infoDiv.querySelector("[data-brand-title]").textContent = brandTitle();
 infoDiv.onclick = () => {
   infoDiv.style.display = "none";
 };

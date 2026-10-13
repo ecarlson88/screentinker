@@ -277,7 +277,7 @@
 <body>
   <!-- Setup Screen -->
   <div id="setupScreen">
-    <h1>ScreenTinker</h1>
+    <h1 data-brand-name>ScreenTinker</h1>
     <div class="subtitle">Web Player</div>
     <div class="form" id="urlForm">
       <label>Server URL</label>
@@ -311,7 +311,7 @@
   <!-- Status Overlay -->
   <div id="statusOverlay" style="display:none">
     <div class="spinner"></div>
-    <h2>ScreenTinker</h2>
+    <h2 data-brand-name>ScreenTinker</h2>
     <p id="statusText" data-i18n="connecting">Connecting...</p>
   </div>
 
@@ -349,7 +349,7 @@
         pairing_hint: 'Enter this code in the dashboard to pair this display',
         connecting: 'Connecting...',
         connecting_muted: 'Connecting (audio muted)...',
-        info_title: 'ScreenTinker Web Player',
+        info_title: '{brand} Web Player',
         info_close_hint: 'Press Back again or click to close',
         info_device_id: 'Device ID',
         info_device_name: 'Device Name',
@@ -371,16 +371,16 @@
         preview_webpage_blocked: 'If this area is blank, the site blocks being embedded and won’t display on the device either. Try a page that allows embedding.',
       },
       es: {
-        web_player: 'Reproductor web', server_url: 'URL del servidor', server_url_placeholder: 'https://signage.tudominio.com', connect: 'Conectar', pairing_code: 'Código de vinculación', pairing_hint: 'Ingresa este código en el panel para vincular esta pantalla', connecting: 'Conectando...', connecting_muted: 'Conectando (audio silenciado)...', info_title: 'Reproductor web ScreenTinker', info_close_hint: 'Presiona Atrás de nuevo o haz clic para cerrar', info_device_id: 'ID del dispositivo', info_device_name: 'Nombre del dispositivo', info_server: 'Servidor', info_status: 'Estado', info_now_playing: 'Reproduciendo', info_resolution: 'Resolución', info_uptime: 'Tiempo activo', info_platform: 'Plataforma', info_cache: 'Caché', info_connected: 'Conectado', info_disconnected: 'Desconectado', info_active: 'Activo', info_inactive: 'Inactivo', info_nothing: 'Nada', info_na: 'N/D', info_sw: 'Service Worker', nothing_scheduled: 'No hay nada programado en este momento', preview_webpage_blocked: 'Si esta área está en blanco, el sitio bloquea la inserción y tampoco se mostrará en el dispositivo. Prueba con una página que permita la inserción.',
+        web_player: 'Reproductor web', server_url: 'URL del servidor', server_url_placeholder: 'https://signage.tudominio.com', connect: 'Conectar', pairing_code: 'Código de vinculación', pairing_hint: 'Ingresa este código en el panel para vincular esta pantalla', connecting: 'Conectando...', connecting_muted: 'Conectando (audio silenciado)...', info_title: 'Reproductor web {brand}', info_close_hint: 'Presiona Atrás de nuevo o haz clic para cerrar', info_device_id: 'ID del dispositivo', info_device_name: 'Nombre del dispositivo', info_server: 'Servidor', info_status: 'Estado', info_now_playing: 'Reproduciendo', info_resolution: 'Resolución', info_uptime: 'Tiempo activo', info_platform: 'Plataforma', info_cache: 'Caché', info_connected: 'Conectado', info_disconnected: 'Desconectado', info_active: 'Activo', info_inactive: 'Inactivo', info_nothing: 'Nada', info_na: 'N/D', info_sw: 'Service Worker', nothing_scheduled: 'No hay nada programado en este momento', preview_webpage_blocked: 'Si esta área está en blanco, el sitio bloquea la inserción y tampoco se mostrará en el dispositivo. Prueba con una página que permita la inserción.',
       },
       fr: {
-        web_player: 'Lecteur web', server_url: 'URL du serveur', server_url_placeholder: 'https://signage.votredomaine.com', connect: 'Connecter', pairing_code: 'Code d’appairage', pairing_hint: 'Saisissez ce code dans le tableau de bord pour apparier cet écran', connecting: 'Connexion...', connecting_muted: 'Connexion (audio coupé)...', info_title: 'Lecteur web ScreenTinker', info_close_hint: 'Appuyez à nouveau sur Retour ou cliquez pour fermer', info_device_id: 'ID de l’appareil', info_device_name: 'Nom de l’appareil', info_server: 'Serveur', info_status: 'État', info_now_playing: 'En lecture', info_resolution: 'Résolution', info_uptime: 'Disponibilité', info_platform: 'Plateforme', info_cache: 'Cache', info_connected: 'Connecté', info_disconnected: 'Déconnecté', info_active: 'Actif', info_inactive: 'Inactif', info_nothing: 'Rien', info_na: 'N/D', info_sw: 'Service Worker', nothing_scheduled: 'Rien de programmé pour le moment', preview_webpage_blocked: 'Si cette zone est vide, le site bloque l’intégration et ne s’affichera pas non plus sur l’appareil. Essayez une page qui l’autorise.',
+        web_player: 'Lecteur web', server_url: 'URL du serveur', server_url_placeholder: 'https://signage.votredomaine.com', connect: 'Connecter', pairing_code: 'Code d’appairage', pairing_hint: 'Saisissez ce code dans le tableau de bord pour apparier cet écran', connecting: 'Connexion...', connecting_muted: 'Connexion (audio coupé)...', info_title: 'Lecteur web {brand}', info_close_hint: 'Appuyez à nouveau sur Retour ou cliquez pour fermer', info_device_id: 'ID de l’appareil', info_device_name: 'Nom de l’appareil', info_server: 'Serveur', info_status: 'État', info_now_playing: 'En lecture', info_resolution: 'Résolution', info_uptime: 'Disponibilité', info_platform: 'Plateforme', info_cache: 'Cache', info_connected: 'Connecté', info_disconnected: 'Déconnecté', info_active: 'Actif', info_inactive: 'Inactif', info_nothing: 'Rien', info_na: 'N/D', info_sw: 'Service Worker', nothing_scheduled: 'Rien de programmé pour le moment', preview_webpage_blocked: 'Si cette zone est vide, le site bloque l’intégration et ne s’affichera pas non plus sur l’appareil. Essayez une page qui l’autorise.',
       },
       de: {
-        web_player: 'Web-Player', server_url: 'Server-URL', server_url_placeholder: 'https://signage.ihredomain.com', connect: 'Verbinden', pairing_code: 'Kopplungscode', pairing_hint: 'Geben Sie diesen Code im Dashboard ein, um diesen Bildschirm zu koppeln', connecting: 'Verbindung wird hergestellt...', connecting_muted: 'Verbindung (Audio stummgeschaltet)...', info_title: 'ScreenTinker Web-Player', info_close_hint: 'Erneut Zurück drücken oder klicken zum Schließen', info_device_id: 'Geräte-ID', info_device_name: 'Gerätename', info_server: 'Server', info_status: 'Status', info_now_playing: 'Aktuelle Wiedergabe', info_resolution: 'Auflösung', info_uptime: 'Betriebszeit', info_platform: 'Plattform', info_cache: 'Cache', info_connected: 'Verbunden', info_disconnected: 'Getrennt', info_active: 'Aktiv', info_inactive: 'Inaktiv', info_nothing: 'Nichts', info_na: 'N/V', info_sw: 'Service Worker', nothing_scheduled: 'Derzeit ist nichts geplant', preview_webpage_blocked: 'Wenn dieser Bereich leer ist, blockiert die Website die Einbettung und wird auch auf dem Gerät nicht angezeigt. Verwenden Sie eine Seite, die dies erlaubt.',
+        web_player: 'Web-Player', server_url: 'Server-URL', server_url_placeholder: 'https://signage.ihredomain.com', connect: 'Verbinden', pairing_code: 'Kopplungscode', pairing_hint: 'Geben Sie diesen Code im Dashboard ein, um diesen Bildschirm zu koppeln', connecting: 'Verbindung wird hergestellt...', connecting_muted: 'Verbindung (Audio stummgeschaltet)...', info_title: '{brand} Web-Player', info_close_hint: 'Erneut Zurück drücken oder klicken zum Schließen', info_device_id: 'Geräte-ID', info_device_name: 'Gerätename', info_server: 'Server', info_status: 'Status', info_now_playing: 'Aktuelle Wiedergabe', info_resolution: 'Auflösung', info_uptime: 'Betriebszeit', info_platform: 'Plattform', info_cache: 'Cache', info_connected: 'Verbunden', info_disconnected: 'Getrennt', info_active: 'Aktiv', info_inactive: 'Inaktiv', info_nothing: 'Nichts', info_na: 'N/V', info_sw: 'Service Worker', nothing_scheduled: 'Derzeit ist nichts geplant', preview_webpage_blocked: 'Wenn dieser Bereich leer ist, blockiert die Website die Einbettung und wird auch auf dem Gerät nicht angezeigt. Verwenden Sie eine Seite, die dies erlaubt.',
       },
       pt: {
-        web_player: 'Player web', server_url: 'URL do servidor', server_url_placeholder: 'https://sign.seudominio.com', connect: 'Conectar', pairing_code: 'Código de pareamento', pairing_hint: 'Digite este código no painel para parear esta tela', connecting: 'Conectando...', connecting_muted: 'Conectando (áudio mudo)...', info_title: 'Player web ScreenTinker', info_close_hint: 'Pressione Voltar novamente ou clique para fechar', info_device_id: 'ID do dispositivo', info_device_name: 'Nome do dispositivo', info_server: 'Servidor', info_status: 'Status', info_now_playing: 'Reproduzindo', info_resolution: 'Resolução', info_uptime: 'Tempo ativo', info_platform: 'Plataforma', info_cache: 'Cache', info_connected: 'Conectado', info_disconnected: 'Desconectado', info_active: 'Ativo', info_inactive: 'Inativo', info_nothing: 'Nada', info_na: 'N/D', info_sw: 'Service Worker', nothing_scheduled: 'Nada programado no momento', preview_webpage_blocked: 'Se esta área estiver em branco, o site bloqueia a incorporação e também não será exibido no dispositivo. Tente uma página que a permita.',
+        web_player: 'Player web', server_url: 'URL do servidor', server_url_placeholder: 'https://sign.seudominio.com', connect: 'Conectar', pairing_code: 'Código de pareamento', pairing_hint: 'Digite este código no painel para parear esta tela', connecting: 'Conectando...', connecting_muted: 'Conectando (áudio mudo)...', info_title: 'Player web {brand}', info_close_hint: 'Pressione Voltar novamente ou clique para fechar', info_device_id: 'ID do dispositivo', info_device_name: 'Nome do dispositivo', info_server: 'Servidor', info_status: 'Status', info_now_playing: 'Reproduzindo', info_resolution: 'Resolução', info_uptime: 'Tempo ativo', info_platform: 'Plataforma', info_cache: 'Cache', info_connected: 'Conectado', info_disconnected: 'Desconectado', info_active: 'Ativo', info_inactive: 'Inativo', info_nothing: 'Nada', info_na: 'N/D', info_sw: 'Service Worker', nothing_scheduled: 'Nada programado no momento', preview_webpage_blocked: 'Se esta área estiver em branco, o site bloqueia a incorporação e também não será exibido no dispositivo. Tente uma página que a permita.',
       },
     };
     const PLAYER_LANG = (() => {
@@ -949,7 +949,7 @@
       try {
         if (localStorage.getItem('st_reset_applied') === token) return;   // already honoured
         const cfg = getConfig();
-        delete cfg.deviceId; delete cfg.deviceToken; delete cfg.pairingCode;
+        delete cfg.deviceId; delete cfg.deviceToken; delete cfg.pairingCode; delete cfg.brand;
         cfg.paired = false;
         localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
         localStorage.removeItem('st_install_id' + SCREEN_SUFFIX);      // mint a NEW identity, not the old one
@@ -969,6 +969,57 @@
     // #314: pending 'wait before reconnecting' hold from a server device:throttled.
     let throttleHoldTimer = null;
     let config = getConfig();
+
+    // ==================== Branding (tab title + favicon) ====================
+    // The page arrives already titled with the domain / instance brand (server.js sendPlayer puts it
+    // in <title> and in __playerConfig.brand). A paired screen switches to its own workspace's brand,
+    // which device:paired and device:branding carry; it is kept in config so a restart or an
+    // offline boot shows it before the socket is up. Unpairing drops it and returns to the served one.
+    const SERVED_BRAND = (window.__playerConfig && window.__playerConfig.brand) || null;
+    // The name on the pairing / status / tap-to-start screens and the info overlay. textContent only.
+    let brandName = (SERVED_BRAND && SERVED_BRAND.brand_name) || 'ScreenTinker';
+    const brandTitle = () => _t('info_title').replace('{brand}', () => brandName);   // fn: a '$' in a name is literal
+    function brandFrom(b) {
+      if (!b || typeof b.brand_name !== 'string' || !b.brand_name) return null;
+      const icon = typeof b.favicon_url === 'string' ? b.favicon_url : '';
+      // Same rule as lib/branding.js safeFaviconUrl: http(s) or a same-origin path, nothing else.
+      const okIcon = /^https?:\/\//i.test(icon) || /^\/(?!\/)/.test(icon);
+      return { brand_name: b.brand_name, favicon_url: okIcon && !/[\s\\]/.test(icon) ? icon : null };
+    }
+    function applyBrand(b) {
+      const brand = brandFrom(b);
+      if (!brand) return;
+      try {
+        brandName = brand.brand_name;
+        document.title = brand.brand_name + ' Player';
+        Array.prototype.forEach.call(document.querySelectorAll('[data-brand-name]'), (el) => { el.textContent = brandName; });
+        Array.prototype.forEach.call(document.querySelectorAll('[data-brand-title]'), (el) => { el.textContent = brandTitle(); });
+        let link = document.querySelector('link[rel="icon"]');
+        if (brand.favicon_url) {
+          if (!link) {
+            link = document.createElement('link');
+            link.setAttribute('rel', 'icon');
+            document.head.appendChild(link);
+          }
+          link.setAttribute('href', brand.favicon_url);
+        } else if (link && link.parentNode) {
+          link.parentNode.removeChild(link);
+        }
+      } catch (e) { /* cosmetic: never let the tab title break the player */ }
+    }
+    // A brand from the server for this screen: remember it and show it. Absent = sender did not say.
+    function adoptBrand(b) {
+      const brand = brandFrom(b);
+      if (!brand) return;
+      config.brand = brand;
+      applyBrand(brand);
+    }
+    // Back to the page's served brand (or the product's own name if the server injected none).
+    function forgetBrand() {
+      delete config.brand;
+      applyBrand(SERVED_BRAND || { brand_name: 'ScreenTinker', favicon_url: null });
+    }
+    applyBrand(config.brand || SERVED_BRAND);
 
     /*
      * #312 follow-up — move this player to a new server address.
@@ -2425,10 +2476,11 @@
         const tapOverlay = document.createElement('div');
         tapOverlay.style.cssText = 'position:fixed;top:0;right:0;bottom:0;left:0;background:#111827;z-index:2000;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer';
         tapOverlay.innerHTML = `
-          <h1 style="color:#3b82f6;font-size:3.6rem;font-family:sans-serif;margin-bottom:1.2rem">ScreenTinker</h1>
+          <h1 data-brand-name style="color:#3b82f6;font-size:3.6rem;font-family:sans-serif;margin-bottom:1.2rem"></h1>
           <p style="color:#94a3b8;font-size:1.8rem;font-family:sans-serif">Tap anywhere to start</p>
           <p style="color:#64748b;font-size:1.3rem;font-family:sans-serif;margin-top:2.4rem">Audio requires user interaction</p>
         `;
+        tapOverlay.querySelector('[data-brand-name]').textContent = brandName;
         tapOverlay.onclick = () => {
           unlockAudio();
           tapOverlay.remove();
@@ -3110,6 +3162,8 @@
          * feature being broken.
          */
         if (data && data.settings_pin) config.settingsPin = String(data.settings_pin);
+        // The workspace's tab title / favicon. Same rule as the PIN: only when the field is present.
+        if (data && data.brand) adoptBrand(data.brand);
         saveConfig(config);
         console.log('Paired as:', data.name);
         document.getElementById('setupScreen').style.display = 'none';
@@ -3141,6 +3195,7 @@
         delete config.deviceId;
         delete config.deviceToken;
         config.paired = false;
+        forgetBrand();   // the next workspace to claim this screen sends its own
         // Before saveConfig. The shell would otherwise hand this identity back on the next load
         // and repair mode would repair nothing.
         try { if (typeof clearVegaIdentity === 'function') clearVegaIdentity(); } catch (e) {}
@@ -3163,6 +3218,13 @@
           saveConfig(config);
           console.log('[settings] PIN updated from the dashboard');
         }
+      });
+
+      // The workspace's branding was edited on the dashboard.
+      socket.on('device:branding', (data) => {
+        if (!data || !data.brand) return;
+        adoptBrand(data.brand);
+        saveConfig(config);
       });
 
       socket.on('device:unpaired', (data) => {
@@ -8266,7 +8328,7 @@
           ctx.fillStyle = '#3b82f6';
           ctx.font = 'bold 28px sans-serif';
           ctx.textAlign = 'center';
-          ctx.fillText('ScreenTinker Web Player', W / 2, H / 2 - 40);
+          ctx.fillText(brandTitle(), W / 2, H / 2 - 40);
           ctx.fillStyle = '#94a3b8';
           ctx.font = '16px sans-serif';
           const item = playlist[currentIndex];
@@ -8573,10 +8635,11 @@
     infoDiv.id = 'infoOverlay';
     infoDiv.style.cssText = 'position:fixed;top:0;right:0;bottom:0;left:0;background:rgba(0,0,0,0.85);z-index:800;display:none;flex-direction:column;align-items:center;justify-content:center;color:#f1f5f9;font-family:-apple-system,sans-serif';
     infoDiv.innerHTML = `
-      <h2 style="color:#3b82f6;margin-bottom:16px">${_t('info_title')}</h2>
+      <h2 data-brand-title style="color:#3b82f6;margin-bottom:16px"></h2>
       <div style="font-size:14px;line-height:2;text-align:center;color:#94a3b8" id="infoContent"></div>
       <p style="margin-top:24px;font-size:12px;color:#64748b">${_t('info_close_hint')}</p>
     `;
+    infoDiv.querySelector('[data-brand-title]').textContent = brandTitle();
     infoDiv.onclick = () => { infoDiv.style.display = 'none'; };
     document.body.appendChild(infoDiv);
 
