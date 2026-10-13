@@ -21,6 +21,7 @@ const flapLimiter = require('../lib/flap-limiter');
 const sessionSettle = require('../lib/session-settle');   // #148 patch2: eviction-storm debounce
 const { resolveIdentity } = require('../lib/device-identity');
 const { resolveSyncBackend } = require('../lib/sync-backend');
+const { playerBrandForDevice } = require('../lib/branding'); // web player tab title + favicon
 // Corporate (head office): the group-sync key and its one definition of sync membership.
 const corpResolve = require('../lib/corporate/resolve');
 const capsLib = require('../lib/player-capabilities');
@@ -2286,7 +2287,10 @@ module.exports = function setupDeviceSocket(io) {
       }
       socket.emit('device:registered', { device_id, device_token, status: 'online' });
       const paired = replica.row ? !!replica.row.user_id : !!verdict.paired;
-      if (paired) socket.emit('device:paired', { device_id, name: (replica.row && replica.row.name) || verdict.name || 'Display' });
+      // Brand only from the mirror row: without it this node does not know the screen's workspace,
+      // and an absent brand leaves the player showing what it already has.
+      if (paired) socket.emit('device:paired', { device_id, name: (replica.row && replica.row.name) || verdict.name || 'Display',
+        brand: replica.row ? playerBrandForDevice(db, device_id) || undefined : undefined });
       // Assignments and media come from the mirror; an unclaimed screen has nothing yet.
       socket.emit('device:playlist-update', replica.row ? buildPlaylistPayload(device_id) : { assignments: [], provisioning: true });
       // The primary learns the screen is up through the same door every later event uses.
@@ -2605,7 +2609,8 @@ module.exports = function setupDeviceSocket(io) {
                   socket.emit('device:paired', {
                     device_id: oldDevice.id,
                     name: oldDevice.name || 'Display',
-                    settings_pin: oldDevice.settings_pin || undefined
+                    settings_pin: oldDevice.settings_pin || undefined,
+                    brand: playerBrandForDevice(db, oldDevice.id) || undefined
                   });
                 }
                 currentDeviceId = existing.device_id;
@@ -2810,7 +2815,8 @@ module.exports = function setupDeviceSocket(io) {
           // — never received it and sat on the Connect page forever showing the URL (Bold #143).
           // Re-send the exact event the client already listens for; no client change needed.
           if (device.user_id) {
-            socket.emit('device:paired', { device_id, name: device.name || 'Display', settings_pin: device.settings_pin || undefined });
+            socket.emit('device:paired', { device_id, name: device.name || 'Display', settings_pin: device.settings_pin || undefined,
+              brand: playerBrandForDevice(db, device_id) || undefined });
           }
           logDeviceStatus(device_id, 'online');
           // Flush any commands/playlist-updates queued while this device was offline.

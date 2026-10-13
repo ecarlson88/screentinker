@@ -677,19 +677,43 @@ const VIEWER_STORAGE_SHIM = ' (function(){try{var m={};var s={getItem:function(k
   + 'setItem:function(k,v){m[k]=String(v);},removeItem:function(k){delete m[k];},clear:function(){m={};},'
   + 'key:function(i){return Object.keys(m)[i]||null;}};Object.defineProperty(s,"length",{get:function(){return Object.keys(m).length;}});'
   + 'Object.defineProperty(window,"localStorage",{value:s,configurable:true});Object.defineProperty(window,"sessionStorage",{value:s,configurable:true});}catch(e){}})();';
+/*
+ * The tab title and favicon a player page is served with: a workspace's branding when the caller
+ * knows it (a view-only link), else the custom-domain / platform-default branding. A paired screen
+ * then switches to its own workspace's brand from device:paired. Null on any failure: the page is
+ * served exactly as committed.
+ */
+function playerPageBrand(ctx) {
+  try {
+    const { db } = require('./db/database');
+    const { resolveBranding, playerBrand } = require('./lib/branding');
+    return playerBrand(resolveBranding(db, ctx));
+  } catch (e) { return null; }
+}
+const escapeHtml = (v) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 function sendPlayer(res, file, opts) {
   const playerHtmlPath = path.join(__dirname, 'player', file);
   fs.readFile(playerHtmlPath, 'utf8', (err, html) => {
     if (err) return res.status(500).type('text/plain').send('player HTML unavailable');
     // View-only viewers (routes/view.js) never report: there is no device to attribute it to.
     const viewer = opts && opts.viewer;
+    const brand = opts && opts.brand;
     const reportingEnabled = !viewer && String(process.env.PLAYER_DEBUG_REPORTING || 'on').toLowerCase() !== 'off';
     const inject =
       '  <script>window.__playerConfig = window.__playerConfig || {}; ' +
       'window.__playerConfig.debugReporting = ' + JSON.stringify(reportingEnabled) + ';' +
       // `<` escaped so nothing in the object can close the script element.
+      // U+2028/2029 too: admin-typed text, and a raw one is a syntax error on the Chrome 53 engines.
+      (brand ? ' window.__playerConfig.brand = ' + JSON.stringify(brand).replace(/</g, '\\u003c')
+        .replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029') + ';' : '') +
       (viewer ? ' window.__playerConfig.viewer = ' + JSON.stringify(viewer).replace(/</g, '\\u003c') + ';' + VIEWER_STORAGE_SHIM : '') +
       '</script>\n';
+    // Branded tab title + favicon, in the HTML itself so the pairing screen shows them with no flash.
+    // Both values were sanitized by playerBrand (favicon: http(s) or same-origin path only).
+    if (brand) {
+      html = html.replace(/<title>[^<]*<\/title>/, () => '<title>' + escapeHtml(brand.brand_name + ' Player') + '</title>'
+        + (brand.favicon_url ? '\n  <link rel="icon" href="' + escapeHtml(brand.favicon_url) + '">' : ''));
+    }
     // Inject right before the debug-overlay.js script tag. If for any reason
     // the tag isn't present (e.g. file edited out), fall back to injecting
     // before </head> so the flag still lands.
@@ -720,11 +744,11 @@ function sendPlayer(res, file, opts) {
 }
 
 app.get(['/player', '/player/', '/player/index.html'], (req, res) => {
-  sendPlayer(res, 'index.html');
+  sendPlayer(res, 'index.html', { brand: playerPageBrand({ domain: (req.hostname || '').toString() }) });
 });
 
 app.get(['/player/legacy', '/player/legacy/', '/player/legacy/index.html', '/player/legacy.html'], (req, res) => {
-  sendPlayer(res, 'legacy.html');
+  sendPlayer(res, 'legacy.html', { brand: playerPageBrand({ domain: (req.hostname || '').toString() }) });
 });
 
 // Which web player can this screen's browser run? (player/check.html — ES3 on purpose, so it runs
@@ -1355,7 +1379,7 @@ app.get('/q/:code', rateLimit(60000, 120), require('./routes/qr-links').redirect
  * token is the credential, so each IP gets one bucket per route shape (lib/limit-paths.js), not one
  * per token. 4s polling is 15/min per open viewer; 240/min leaves room for a wall of them on one NAT.
  */
-app.get(['/view/:key', '/view/screen/:id', '/api/view/:kind/:key/payload'], rateLimit(60000, 240), require('./routes/view')({ sendPlayer }));
+app.get(['/view/:key', '/view/screen/:id', '/api/view/:kind/:key/payload'], rateLimit(60000, 240), require('./routes/view')({ sendPlayer, playerPageBrand }));
 // Canva OAuth callback (routes/canva.js): the browser returns from canva.com with no Authorization
 // header, so it cannot sit behind the JWT-only /api/canva mount below. It trusts only the signed
 // httpOnly transaction cookie set when the person pressed Connect.
@@ -2938,7 +2962,9 @@ app.post('/api/provision/pair', requireAuth, resolveTenancy, checkDeviceLimit, (
   require('./lib/device-group-rules').reconcileDeviceAsSystem(db, null, device.id);
 
   // Notify the device via WebSocket — or, scale-out C2, through the replica it is attached to.
-  const pairedMsg = { device_id: device.id, name: pairedName, settings_pin: settingsPin };
+  // brand: the claiming workspace's tab title / favicon, so the web player rebrands at pair time.
+  const pairedMsg = { device_id: device.id, name: pairedName, settings_pin: settingsPin,
+    brand: require('./lib/branding').playerBrandForDevice(db, device.id) || undefined };
   const pairedRoom = deviceNs.adapter.rooms.get(device.id);
   if (pairedRoom && pairedRoom.size > 0) deviceNs.to(device.id).emit('device:paired', pairedMsg);
   else if (device.attached_node_id) { try { require('./lib/mesh/command-relay').relayToAttached(db, device.id, 'device:paired', pairedMsg); } catch (e) { /* the screen learns on its next register */ } }

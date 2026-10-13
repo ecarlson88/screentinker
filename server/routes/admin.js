@@ -10,7 +10,7 @@ const { canAdminWorkspace } = require('../lib/permissions');
 const { requirePlatformAdmin, requireAdmin } = require('../middleware/auth');
 const { logActivity, getClientIp } = require('../services/activity');
 const { deleteWorkspaceCascade, deleteOrgCascade, releaseWorkspaceMember } = require('../lib/user-deletion');
-const { platformDefaultRow, HARDCODED_BRANDING, PLATFORM_DEFAULT_ID } = require('../lib/branding');
+const { platformDefaultRow, HARDCODED_BRANDING, PLATFORM_DEFAULT_ID, isAcceptableFaviconUrl, pushPlayerBrandToInheritors } = require('../lib/branding');
 
 // Admin-provisioned user creation (#10). Operates on a target workspace
 // specified in the body, NOT the caller's active workspace - so this router is
@@ -507,6 +507,9 @@ router.get('/branding', requirePlatformAdmin, (req, res) => {
 
 // PUT - upsert the single platform-default row (workspace_id IS NULL).
 router.put('/branding', requirePlatformAdmin, (req, res) => {
+  if (!isAcceptableFaviconUrl(req.body.favicon_url)) {
+    return res.status(400).json({ error: 'favicon_url must be an http(s) URL or a path starting with /.' });
+  }
   const existing = platformDefaultRow(db);
   if (existing) {
     const updates = [];
@@ -537,6 +540,8 @@ router.put('/branding', requirePlatformAdmin, (req, res) => {
     );
   }
   logActivity(req.user.id, 'admin_set_platform_branding', `brand: ${req.body.brand_name || ''}`, null, getClientIp(req), null);
+  // Screens whose workspace has no branding of its own inherit this row: push it to them live.
+  pushPlayerBrandToInheritors(req.app.get('io'), db);
   res.json(platformDefaultRow(db));
 });
 

@@ -949,7 +949,7 @@
       try {
         if (localStorage.getItem('st_reset_applied') === token) return;   // already honoured
         const cfg = getConfig();
-        delete cfg.deviceId; delete cfg.deviceToken; delete cfg.pairingCode;
+        delete cfg.deviceId; delete cfg.deviceToken; delete cfg.pairingCode; delete cfg.brand;
         cfg.paired = false;
         localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
         localStorage.removeItem('st_install_id' + SCREEN_SUFFIX);      // mint a NEW identity, not the old one
@@ -969,6 +969,51 @@
     // #314: pending 'wait before reconnecting' hold from a server device:throttled.
     let throttleHoldTimer = null;
     let config = getConfig();
+
+    // ==================== Branding (tab title + favicon) ====================
+    // The page arrives already titled with the domain / instance brand (server.js sendPlayer puts it
+    // in <title> and in __playerConfig.brand). A paired screen switches to its own workspace's brand,
+    // which device:paired and device:branding carry; it is kept in config so a restart or an
+    // offline boot shows it before the socket is up. Unpairing drops it and returns to the served one.
+    const SERVED_BRAND = (window.__playerConfig && window.__playerConfig.brand) || null;
+    function brandFrom(b) {
+      if (!b || typeof b.brand_name !== 'string' || !b.brand_name) return null;
+      const icon = typeof b.favicon_url === 'string' ? b.favicon_url : '';
+      // Same rule as lib/branding.js safeFaviconUrl: http(s) or a same-origin path, nothing else.
+      const okIcon = /^https?:\/\//i.test(icon) || /^\/(?!\/)/.test(icon);
+      return { brand_name: b.brand_name, favicon_url: okIcon && !/[\s\\]/.test(icon) ? icon : null };
+    }
+    function applyBrand(b) {
+      const brand = brandFrom(b);
+      if (!brand) return;
+      try {
+        document.title = brand.brand_name + ' Player';
+        let link = document.querySelector('link[rel="icon"]');
+        if (brand.favicon_url) {
+          if (!link) {
+            link = document.createElement('link');
+            link.setAttribute('rel', 'icon');
+            document.head.appendChild(link);
+          }
+          link.setAttribute('href', brand.favicon_url);
+        } else if (link && link.parentNode) {
+          link.parentNode.removeChild(link);
+        }
+      } catch (e) { /* cosmetic: never let the tab title break the player */ }
+    }
+    // A brand from the server for this screen: remember it and show it. Absent = sender did not say.
+    function adoptBrand(b) {
+      const brand = brandFrom(b);
+      if (!brand) return;
+      config.brand = brand;
+      applyBrand(brand);
+    }
+    // Back to the page's served brand (or the product's own name if the server injected none).
+    function forgetBrand() {
+      delete config.brand;
+      applyBrand(SERVED_BRAND || { brand_name: 'ScreenTinker', favicon_url: null });
+    }
+    applyBrand(config.brand || SERVED_BRAND);
 
     /*
      * #312 follow-up — move this player to a new server address.
@@ -3110,6 +3155,8 @@
          * feature being broken.
          */
         if (data && data.settings_pin) config.settingsPin = String(data.settings_pin);
+        // The workspace's tab title / favicon. Same rule as the PIN: only when the field is present.
+        if (data && data.brand) adoptBrand(data.brand);
         saveConfig(config);
         console.log('Paired as:', data.name);
         document.getElementById('setupScreen').style.display = 'none';
@@ -3141,6 +3188,7 @@
         delete config.deviceId;
         delete config.deviceToken;
         config.paired = false;
+        forgetBrand();   // the next workspace to claim this screen sends its own
         // Before saveConfig. The shell would otherwise hand this identity back on the next load
         // and repair mode would repair nothing.
         try { if (typeof clearVegaIdentity === 'function') clearVegaIdentity(); } catch (e) {}
@@ -3163,6 +3211,13 @@
           saveConfig(config);
           console.log('[settings] PIN updated from the dashboard');
         }
+      });
+
+      // The workspace's branding was edited on the dashboard.
+      socket.on('device:branding', (data) => {
+        if (!data || !data.brand) return;
+        adoptBrand(data.brand);
+        saveConfig(config);
       });
 
       socket.on('device:unpaired', (data) => {

@@ -966,6 +966,7 @@ function loadLayoutCache() {
     delete cfg.deviceId;
     delete cfg.deviceToken;
     delete cfg.pairingCode;
+    delete cfg.brand;
     cfg.paired = false;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     localStorage.removeItem("st_install_id" + SCREEN_SUFFIX);
@@ -984,6 +985,43 @@ function loadLayoutCache() {
 let socket = null;
 let throttleHoldTimer = null;
 let config = getConfig();
+const SERVED_BRAND = window.__playerConfig && window.__playerConfig.brand || null;
+function brandFrom(b) {
+  if (!b || typeof b.brand_name !== "string" || !b.brand_name) return null;
+  const icon = typeof b.favicon_url === "string" ? b.favicon_url : "";
+  const okIcon = /^https?:\/\//i.test(icon) || /^\/(?!\/)/.test(icon);
+  return { brand_name: b.brand_name, favicon_url: okIcon && !/[\s\\]/.test(icon) ? icon : null };
+}
+function applyBrand(b) {
+  const brand = brandFrom(b);
+  if (!brand) return;
+  try {
+    document.title = brand.brand_name + " Player";
+    let link = document.querySelector('link[rel="icon"]');
+    if (brand.favicon_url) {
+      if (!link) {
+        link = document.createElement("link");
+        link.setAttribute("rel", "icon");
+        document.head.appendChild(link);
+      }
+      link.setAttribute("href", brand.favicon_url);
+    } else if (link && link.parentNode) {
+      link.parentNode.removeChild(link);
+    }
+  } catch (e) {
+  }
+}
+function adoptBrand(b) {
+  const brand = brandFrom(b);
+  if (!brand) return;
+  config.brand = brand;
+  applyBrand(brand);
+}
+function forgetBrand() {
+  delete config.brand;
+  applyBrand(SERVED_BRAND || { brand_name: "ScreenTinker", favicon_url: null });
+}
+applyBrand(config.brand || SERVED_BRAND);
 function moveToServer(rawUrl, handoffKey) {
   return __async(this, null, function* () {
     const emitLog = (m) => {
@@ -2635,6 +2673,7 @@ function connect(serverUrl) {
     config.paired = true;
     config.deviceName = data.name;
     if (data && data.settings_pin) config.settingsPin = String(data.settings_pin);
+    if (data && data.brand) adoptBrand(data.brand);
     saveConfig(config);
     console.log("Paired as:", data.name);
     document.getElementById("setupScreen").style.display = "none";
@@ -2646,6 +2685,7 @@ function connect(serverUrl) {
     delete config.deviceId;
     delete config.deviceToken;
     config.paired = false;
+    forgetBrand();
     try {
       if (typeof clearVegaIdentity === "function") clearVegaIdentity();
     } catch (e) {
@@ -2667,6 +2707,11 @@ function connect(serverUrl) {
       saveConfig(config);
       console.log("[settings] PIN updated from the dashboard");
     }
+  });
+  socket.on("device:branding", (data) => {
+    if (!data || !data.brand) return;
+    adoptBrand(data.brand);
+    saveConfig(config);
   });
   socket.on("device:unpaired", (data) => {
     console.warn("Device not found on server \u2014 clearing credentials");

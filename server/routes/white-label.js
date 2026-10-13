@@ -7,7 +7,7 @@ const { db } = require('../db/database');
 // Phase 2.2f: workspace-scoped branding. POST gated by requireWorkspaceAdmin
 // per the design doc (branding is a workspace_admin power, not editor).
 const { requireWorkspaceAdmin } = require('../lib/permissions');
-const { resolveBranding, publicBranding } = require('../lib/branding');
+const { resolveBranding, publicBranding, isAcceptableFaviconUrl, pushPlayerBrandToWorkspace } = require('../lib/branding');
 
 // Get the current workspace's effective branding. #15: when the workspace has no
 // row of its own, fall through to the platform default (workspace_id IS NULL)
@@ -43,6 +43,11 @@ router.post('/', requireWorkspaceAdmin, (req, res) => {
     return res.status(403).json({ error: 'custom_domain and custom_css can only be set by a platform administrator.' });
   }
 
+  // The favicon is rendered into every web player's <head>: http(s) or a same-origin path only.
+  if (!isAcceptableFaviconUrl(favicon_url)) {
+    return res.status(400).json({ error: 'favicon_url must be an http(s) URL or a path starting with /.' });
+  }
+
   let wl = db.prepare('SELECT * FROM white_labels WHERE workspace_id = ?').get(req.workspaceId);
 
   if (wl) {
@@ -66,6 +71,8 @@ router.post('/', requireWorkspaceAdmin, (req, res) => {
       custom_domain || null, custom_css || null, hide_branding ? 1 : 0);
   }
 
+  // Live screens in this workspace pick up the new tab title / favicon now, not on next reconnect.
+  pushPlayerBrandToWorkspace(req.app.get('io'), db, req.workspaceId);
   res.json(db.prepare('SELECT * FROM white_labels WHERE workspace_id = ?').get(req.workspaceId));
 });
 

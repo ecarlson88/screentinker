@@ -47,7 +47,7 @@ const UNAVAILABLE_HTML = '<!DOCTYPE html><html><head><meta charset="utf-8"><meta
   + 'background:#111827;color:#e5e7eb;font:18px sans-serif;text-align:center;padding:24px;box-sizing:border-box">'
   + '<div>This view is not available.</div></body></html>';
 
-module.exports = function viewRoutes({ sendPlayer }) {
+module.exports = function viewRoutes({ sendPlayer, playerPageBrand }) {
   const router = express.Router();
 
   function page(req, res, by, payloadPath) {
@@ -56,7 +56,9 @@ module.exports = function viewRoutes({ sendPlayer }) {
     if (!r.device) return res.status(r.status).type('html').send(UNAVAILABLE_HTML);
     // ?legacy=1 serves the ES5 build for old browsers, exactly as /player/legacy does for screens.
     const file = req.query.legacy === '1' ? 'legacy.html' : 'index.html';
-    sendPlayer(res, file, { viewer: { payload_url: payloadPath, poll_ms: viewAccess.POLL_MS } });
+    // The viewed screen's workspace branding, the same brand that screen itself shows.
+    const brand = playerPageBrand ? playerPageBrand({ workspaceId: r.device.workspace_id || null }) : null;
+    sendPlayer(res, file, { viewer: { payload_url: payloadPath, poll_ms: viewAccess.POLL_MS }, brand });
   }
 
   function payload(req, res, by) {
