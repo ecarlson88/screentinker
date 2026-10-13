@@ -97,6 +97,7 @@ test('with no branding at all, the player keeps a sane title and no favicon link
   for (const url of ['/player', '/player/legacy']) {
     const html = await page(url);
     assert.equal(titleOf(html), 'ScreenTinker Player', url);
+    assert.match(html, /<h1 data-brand-name>ScreenTinker<\/h1>/, url);
     assert.equal(iconOf(html), undefined, url);
   }
 });
@@ -107,6 +108,8 @@ test('the platform default brands /player and /player/legacy, escaped', async ()
     const html = await page(url);
     assert.equal(titleOf(html), 'Acme &lt;b&gt;&amp;&quot;Co&quot; Player', url);
     assert.equal(iconOf(html), '/brand/icon.png?a=1&amp;b=&quot;2&quot;', url);
+    assert.match(html, /<h1 data-brand-name>Acme &lt;b&gt;&amp;&quot;Co&quot;<\/h1>/, url + ' pairing heading');
+    assert.match(html, /<h2 data-brand-name>Acme &lt;b&gt;&amp;&quot;Co&quot;<\/h2>/, url + ' status heading');
     assert.doesNotMatch(html, /<b>&"Co"/, 'the raw name never reaches the markup');
     // The client's starting point, with `<` escaped so it cannot close the inline script.
     assert.match(html, /window\.__playerConfig\.brand = \{"brand_name":"Acme \\u003cb>&\\"Co\\"","favicon_url":"\/brand\/icon\.png\?a=1&b=\\"2\\""\};/, url);
@@ -119,6 +122,13 @@ test('a line separator in the brand name cannot break the inline script on old e
   assert.match(html, /"brand_name":"Acme\\u2028Co"/);
   const script = html.slice(html.indexOf('window.__playerConfig.brand'), html.indexOf('</script>', html.indexOf('window.__playerConfig.brand')));
   assert.equal(script.includes('\u2028'), false, 'no raw U+2028 inside the inline script');
+});
+
+test("a '$' pattern in the brand name is literal, not a replacement pattern", async () => {
+  setPlatformDefault("Acme $& $' Co", null);
+  const html = await page('/player');
+  assert.equal(titleOf(html), "Acme $&amp; $' Co Player");
+  assert.match(html, /window\.__playerConfig\.brand = \{"brand_name":"Acme \$& \$' Co","favicon_url":null\};<\/script>/);
 });
 
 test('an unsafe favicon already in the DB is never emitted; saving one is refused', async () => {

@@ -712,16 +712,20 @@ function sendPlayer(res, file, opts) {
     // Both values were sanitized by playerBrand (favicon: http(s) or same-origin path only).
     if (brand) {
       html = html.replace(/<title>[^<]*<\/title>/, () => '<title>' + escapeHtml(brand.brand_name + ' Player') + '</title>'
-        + (brand.favicon_url ? '\n  <link rel="icon" href="' + escapeHtml(brand.favicon_url) + '">' : ''));
+        + (brand.favicon_url ? '\n  <link rel="icon" href="' + escapeHtml(brand.favicon_url) + '">' : ''))
+        // The pairing / status headings, so they never flash the product name first.
+        .replace(/(<h([12]) data-brand-name>)[^<]*(<\/h\2>)/g, (m, open, lvl, close) => open + escapeHtml(brand.brand_name) + close);
     }
+    // Function replacements throughout: `inject` carries admin-typed text, and a `$&` in a string
+    // replacement would splice the matched markup into the script.
     // Inject right before the debug-overlay.js script tag. If for any reason
     // the tag isn't present (e.g. file edited out), fall back to injecting
     // before </head> so the flag still lands.
     let modified;
     if (html.indexOf('<script src="/player/debug-overlay.js"') >= 0) {
-      modified = html.replace('<script src="/player/debug-overlay.js"', inject + '  <script src="/player/debug-overlay.js"');
+      modified = html.replace('<script src="/player/debug-overlay.js"', () => inject + '  <script src="/player/debug-overlay.js"');
     } else {
-      modified = html.replace('</head>', inject + '</head>');
+      modified = html.replace('</head>', () => inject + '</head>');
     }
 
     // Stamp the page's own version, so client_version tracks the release that served it instead of
